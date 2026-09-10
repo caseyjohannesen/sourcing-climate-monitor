@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -36,7 +36,7 @@ jobs:
       # instead of re-downloading from NOAA every day. Runners are ephemeral, so
       # without this the file would be fetched on every single run.
       - name: Cache 1991-2020 climatology
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: sst.day.ltm.1991-2020.nc
           key: oisst-climatology-1991-2020-v1
