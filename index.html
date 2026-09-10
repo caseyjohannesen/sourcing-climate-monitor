@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sourcing Climate Monitor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+  :root{
+    --ink:#0F2A2E; --panel:#153338; --panel-2:#1C3E44; --line:#2A4E54;
+    --paper:#EDEAE1; --muted:#8FA6A8; --gold:#D9A441; --gold-dim:#B8893A;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--ink);color:var(--paper);font-family:'IBM Plex Sans',sans-serif;height:100%;}
+  h1,h2{font-family:'Fraunces',serif;}
+
+  .app{display:flex;flex-direction:column;height:100vh;min-height:600px;}
+
+  header{padding:20px 28px 16px 28px;border-bottom:1px solid var(--line);flex-shrink:0;}
+  .title-row{display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;}
+  .title-row h1{font-size:22px;font-weight:500;margin:0;color:var(--paper);}
+  .title-row .sub{color:var(--muted);font-size:13px;margin-top:4px;}
+  .refresh{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;}
+  .refresh button{background:var(--panel-2);border:1px solid var(--line);color:var(--paper);padding:6px 12px;border-radius:5px;font-size:12px;cursor:pointer;font-family:inherit;}
+  .refresh button:hover{border-color:var(--gold);}
+
+  .enso-strip{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 18px;display:flex;align-items:center;gap:28px;flex-wrap:wrap;}
+  .enso-metric{display:flex;flex-direction:column;gap:2px;}
+  .enso-metric .label{font-size:11px;color:var(--muted);}
+  .enso-metric .val{font-size:20px;font-family:'Fraunces',serif;color:var(--paper);}
+  .enso-metric .val.phase{color:var(--gold);}
+  .enso-note{font-size:11px;color:var(--muted);margin-left:auto;max-width:280px;line-height:1.4;}
+
+  .body{flex:1;position:relative;overflow:hidden;background:radial-gradient(ellipse at center, #123137 0%, #0B2124 100%);}
+  .body canvas{display:block;width:100%;height:100%;cursor:grab;}
+  .body canvas.dragging{cursor:grabbing;}
+
+  .map-caption{position:absolute;bottom:14px;left:20px;font-size:11px;color:var(--muted);background:rgba(15,42,46,0.75);padding:6px 10px;border-radius:5px;max-width:340px;line-height:1.5;}
+  .map-caption .status{color:var(--gold);}
+  .map-hint{position:absolute;top:14px;right:20px;font-size:11px;color:var(--muted);background:rgba(15,42,46,0.7);padding:6px 10px;border-radius:5px;}
+
+  .legend{position:absolute;bottom:14px;right:20px;background:rgba(15,42,46,0.75);padding:10px 12px;border-radius:5px;}
+  .legend .bar{width:180px;height:10px;border-radius:3px;background:linear-gradient(to right, rgb(20,60,120), rgb(240,240,240), rgb(190,30,30));margin-bottom:4px;}
+  .legend .ticks{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);width:180px;}
+  .legend .title{font-size:10px;color:var(--muted);margin-bottom:6px;}
+
+  .uploader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(11,33,36,0.55);}
+  .uploader-inner{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px 26px;text-align:center;max-width:280px;}
+  .uploader-title{font-family:'Fraunces',serif;font-size:17px;margin-bottom:6px;}
+  .uploader-sub{font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.4;}
+  .uploader-btn{display:inline-block;background:var(--gold);color:var(--ink);font-size:13px;font-weight:600;padding:8px 16px;border-radius:6px;cursor:pointer;}
+  .uploader-btn input{display:none;}
+  .uploader.hidden{display:none;}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="title-row">
+      <div>
+        <h1>Sourcing Climate Monitor</h1>
+        <div class="sub">v0 prototype — sea surface temperature anomaly overlay</div>
+      </div>
+      <div class="refresh">
+        <span id="lastUpdated">—</span>
+        <button>Load data file</button>
+      </div>
+    </div>
+    <div class="enso-strip">
+      <div class="enso-metric"><span class="label">Niño 3.4 SST anomaly</span><span class="val">+1.4°C</span></div>
+      <div class="enso-metric"><span class="label">Phase</span><span class="val phase">El Niño — Strong</span></div>
+      <div class="enso-metric"><span class="label">3-month trend</span><span class="val">Weakening</span></div>
+      <div class="enso-note">Placeholder values — wire this strip to your existing NOAA CPC monitoring flow for a live feed.</div>
+    </div>
+  </header>
+
+  <div class="body" id="mapWrap">
+    <div class="map-hint">Drag to rotate · scroll to zoom</div>
+    <div class="map-caption">Sea surface temperature anomaly · <span class="status" id="dataSource">no data loaded</span></div>
+    <div class="legend">
+      <div class="title">SST anomaly (°C, clamped)</div>
+      <div class="bar"></div>
+      <div class="ticks"><span>-4</span><span>-2</span><span>0</span><span>+2</span><span>+4</span></div>
+    </div>
+    <div class="uploader" id="uploader">
+      <div class="uploader-inner">
+        <div class="uploader-title">Load SST anomaly data</div>
+        <div class="uploader-sub">Upload the sst_anomaly.json produced by extract_sst_anomaly.py</div>
+        <label class="uploader-btn">Choose file<input type="file" id="fileInput" accept="application/json" /></label>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- rough low-poly landmasses in lat/lon, purely for visual context ----
+const LAND = [
+  [[-168,66],[-140,70],[-95,72],[-80,65],[-65,58],[-55,50],[-60,45],[-80,25],[-97,18],[-105,20],[-117,32],[-125,45],[-140,58],[-155,60],[-168,66]],
+  [[-80,10],[-70,10],[-60,5],[-50,0],[-35,-5],[-40,-20],[-58,-35],[-68,-45],[-73,-53],[-70,-20],[-78,-5],[-80,10]],
+  [[-18,35],[0,35],[10,37],[20,32],[33,31],[35,20],[43,12],[40,4],[42,-10],[35,-25],[20,-35],[13,-18],[10,5],[-6,10],[-17,15],[-18,35]],
+  [[-10,36],[0,42],[12,44],[20,42],[30,45],[38,45],[40,55],[28,58],[15,55],[3,51],[-8,50],[-10,42],[-10,36]],
+  [[27,45],[40,50],[55,52],[70,55],[90,60],[110,60],[130,55],[145,45],[140,35],[122,32],[105,22],[95,10],[80,8],[68,24],[60,25],[48,30],[35,37],[27,45]],
+  [[113,-22],[122,-18],[136,-12],[145,-17],[153,-28],[150,-38],[140,-38],[130,-32],[115,-34],[113,-22]],
+];
+
+function lerp(a,b,t){return a+(b-a)*t;}
+
+// Diverging colormap, clamped to +/-4C so the rare far-outlier cells (ice-edge,
+// western-boundary-current regions) don't wash out the scale for everywhere else.
+const CLAMP = 4;
+function anomalyRGB(v){
+  const c = Math.max(-CLAMP, Math.min(CLAMP, v));
+  let r,g,b;
+  if(c<0){ const t=(c+CLAMP)/CLAMP; r=lerp(20,240,t); g=lerp(60,240,t); b=lerp(120,240,t); }
+  else { const t=c/CLAMP; r=lerp(240,190,t); g=lerp(240,30,t); b=lerp(240,30,t); }
+  return [r,g,b];
+}
+
+// Build a globe texture directly from the extract_sst_anomaly.py JSON output.
+// Cells the script marked null (land / no data) render as neutral grey --
+// since that mask comes straight from NOAA's own data, coastlines here are
+// real, not hand-drawn.
+function buildTextureFromData(data){
+  const lat = data.lat, lon = data.lon, grid = data.anomaly_c;
+  const h = lat.length, w = lon.length;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  // JSON lat[] ascends south -> north; canvas row 0 must be the north pole
+  // (matches the sphere's UV/position convention), so rows are flipped here.
+  for(let i=0;i<h;i++){
+    const canvasRow = h - 1 - i;
+    const row = grid[i];
+    for(let j=0;j<w;j++){
+      const v = row[j];
+      let r,g,b;
+      if(v === null || v === undefined){ r=124; g=122; b=112; }
+      else { [r,g,b] = anomalyRGB(v); }
+      const idx = (canvasRow*w + j) * 4;
+      img.data[idx]=r; img.data[idx+1]=g; img.data[idx+2]=b; img.data[idx+3]=255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  return tex;
+}
+
+// Neutral placeholder shown before any file is loaded.
+function buildBlankTexture(){
+  const canvas = document.createElement('canvas');
+  canvas.width = 4; canvas.height = 4;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#173a40';
+  ctx.fillRect(0,0,4,4);
+  return new THREE.CanvasTexture(canvas);
+}
+
+// ---- three.js scene setup ----
+let scene, camera, renderer, globe, globeMesh;
+let dragging=false, lastX=0, lastY=0, rotY=0, rotX=-0.15, autoRotate=true;
+const GLOBE_R = 1.4;
+
+function initGlobe(){
+  const wrap = document.getElementById('mapWrap');
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(45, wrap.clientWidth/wrap.clientHeight, 0.1, 100);
+  camera.position.set(0,0,3.4);
+
+  renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  wrap.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.95));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.5);
+  dl.position.set(3,2,4);
+  scene.add(dl);
+
+  const geo = new THREE.SphereGeometry(GLOBE_R, 64, 64);
+  const mat = new THREE.MeshPhongMaterial({map: buildBlankTexture(), shininess:4});
+  globeMesh = new THREE.Mesh(geo, mat);
+  globe = new THREE.Group();
+  globe.add(globeMesh);
+  scene.add(globe);
+
+  const canvas = renderer.domElement;
+  canvas.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  canvas.addEventListener('wheel', onWheel, {passive:false});
+  window.addEventListener('resize', onResize);
+
+  document.getElementById('fileInput').addEventListener('change', onFileChosen);
+  document.getElementById('lastUpdated').textContent = '';
+  document.querySelector('.refresh button').addEventListener('click', () => {
+    document.getElementById('fileInput').click();
+  });
+
+  animate();
+}
+
+// Shared by both the automatic fetch and the manual file picker: validate the
+// parsed JSON, build the globe texture, and update the status UI. Returns true
+// on success so callers can decide whether to keep the fallback uploader up.
+function applyData(data, updatedLabel){
+  if(!data.lat || !data.lon || !data.anomaly_c){
+    document.getElementById('dataSource').textContent = 'data is missing expected fields (lat/lon/anomaly_c)';
+    return false;
+  }
+  globeMesh.material.map = buildTextureFromData(data);
+  globeMesh.material.needsUpdate = true;
+  document.getElementById('dataSource').textContent = `${data.date || 'unknown date'} — ${data.source || 'source unspecified'}`;
+  document.getElementById('lastUpdated').textContent = updatedLabel;
+  document.getElementById('uploader').classList.add('hidden');
+  return true;
+}
+
+// On page load, try to fetch the committed data sitting next to this page. On
+// GitHub Pages this is the daily-refreshed file; opened locally (file://) or
+// before the first workflow run the fetch fails, and we fall back to the
+// manual uploader overlay (which stays visible).
+function autoLoadData(){
+  fetch('./sst_anomaly.json', {cache: 'no-store'})
+    .then(resp => { if(!resp.ok) throw new Error('HTTP ' + resp.status); return resp.json(); })
+    .then(data => { applyData(data, 'Updated ' + (data.date || 'unknown date')); })
+    .catch(() => {
+      document.getElementById('dataSource').textContent = 'no live data found — load a file below';
+    });
+}
+
+function onFileChosen(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    let data;
+    try{ data = JSON.parse(ev.target.result); }
+    catch(err){
+      document.getElementById('dataSource').textContent = 'could not parse file: ' + err.message;
+      return;
+    }
+    applyData(data, 'Loaded ' + new Date().toLocaleTimeString());
+  };
+  reader.readAsText(file);
+}
+
+let downX=0, downY=0, moved=0;
+function onPointerDown(e){ dragging=true; autoRotate=false; lastX=e.clientX; lastY=e.clientY; renderer.domElement.classList.add('dragging'); }
+function onPointerMove(e){
+  if(!dragging) return;
+  const dx = e.clientX-lastX, dy = e.clientY-lastY;
+  rotY += dx*0.005;
+  rotX = Math.max(-1.2, Math.min(1.2, rotX + dy*0.005));
+  lastX = e.clientX; lastY = e.clientY;
+}
+function onPointerUp(){ dragging=false; renderer.domElement.classList.remove('dragging'); }
+function onWheel(e){ e.preventDefault(); camera.position.z = Math.max(2.1, Math.min(6, camera.position.z + e.deltaY*0.0025)); }
+function onResize(){
+  const wrap = document.getElementById('mapWrap');
+  camera.aspect = wrap.clientWidth/wrap.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+}
+function animate(){
+  requestAnimationFrame(animate);
+  if(autoRotate) rotY += 0.0015;
+  globe.rotation.y = rotY;
+  globe.rotation.x = rotX;
+  renderer.render(scene, camera);
+}
+
+initGlobe();
+autoLoadData();
+</script>
+</body>
+</html>

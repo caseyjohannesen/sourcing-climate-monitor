@@ -1,0 +1,11 @@
+# Cached 1991-2020 climatology downloaded by extract_sst_anomaly.py (~90MB).
+# Never commit it: too large for git, and the workflow caches it separately.
+sst.day.ltm.1991-2020.nc
+*.nc
+*.nc.part
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

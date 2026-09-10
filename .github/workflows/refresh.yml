@@ -1,0 +1,55 @@
+name: Refresh SST anomaly
+
+on:
+  schedule:
+    # 13:00 UTC daily, after NOAA's daily OISST v2 High-Res update lands.
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}   # allow manual runs (first run / testing)
+
+# Let the job push the refreshed JSON back to the repo.
+permissions:
+  contents: write
+
+# Never let two refreshes run at once (e.g. a manual run during the schedule).
+concurrency:
+  group: refresh-sst
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install xarray netCDF4 pandas numpy requests
+
+      # The 1991-2020 climatology (~90MB) never changes, so cache it across runs
+      # instead of re-downloading from NOAA every day. Runners are ephemeral, so
+      # without this the file would be fetched on every single run.
+      - name: Cache 1991-2020 climatology
+        uses: actions/cache@v4
+        with:
+          path: sst.day.ltm.1991-2020.nc
+          key: oisst-climatology-1991-2020-v1
+
+      - name: Extract latest SST anomaly
+        run: python extract_sst_anomaly.py --out sst_anomaly.json
+
+      - name: Commit refreshed data if it changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sst_anomaly.json
+          if git diff --cached --quiet; then
+            echo "sst_anomaly.json unchanged; nothing to commit."
+          else
+            git commit -m "Refresh SST anomaly ($(date -u +%Y-%m-%d))"
+            git push
+          fi
