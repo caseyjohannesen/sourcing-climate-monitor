@@ -41,8 +41,9 @@
   .map-hint{position:absolute;top:14px;right:20px;font-size:11px;color:var(--muted);background:rgba(15,42,46,0.7);padding:6px 10px;border-radius:5px;}
 
   .legend{position:absolute;bottom:14px;right:20px;background:rgba(15,42,46,0.75);padding:10px 12px;border-radius:5px;}
-  .legend .bar{width:180px;height:10px;border-radius:3px;background:linear-gradient(to right, rgb(20,60,120), rgb(240,240,240), rgb(190,30,30));margin-bottom:4px;}
-  .legend .ticks{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);width:180px;}
+  .legend .bar{display:flex;width:220px;height:10px;border-radius:3px;overflow:hidden;margin-bottom:4px;}
+  .legend .bar span{flex:1;}
+  .legend .ticks{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);width:220px;}
   .legend .title{font-size:10px;color:var(--muted);margin-bottom:6px;}
 
   .uploader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(11,33,36,0.55);}
@@ -79,9 +80,9 @@
     <div class="map-hint">Drag to rotate · scroll to zoom</div>
     <div class="map-caption">Sea surface temperature anomaly · <span class="status" id="dataSource">no data loaded</span></div>
     <div class="legend">
-      <div class="title">SST anomaly (°C, clamped)</div>
-      <div class="bar"></div>
-      <div class="ticks"><span>-4</span><span>-2</span><span>0</span><span>+2</span><span>+4</span></div>
+      <div class="title">SST anomaly (°C)</div>
+      <div class="bar" id="legendBar"></div>
+      <div class="ticks"><span>-5</span><span>-3</span><span>-1</span><span>0</span><span>+1</span><span>+3</span><span>+5</span></div>
     </div>
     <div class="uploader" id="uploader">
       <div class="uploader-inner">
@@ -104,17 +105,35 @@ const LAND = [
   [[113,-22],[122,-18],[136,-12],[145,-17],[153,-28],[150,-38],[140,-38],[130,-32],[115,-34],[113,-22]],
 ];
 
-function lerp(a,b,t){return a+(b-a)*t;}
-
-// Diverging colormap, clamped to +/-4C so the rare far-outlier cells (ice-edge,
-// western-boundary-current regions) don't wash out the scale for everywhere else.
-const CLAMP = 4;
+// Discrete (banded) colormap sampled from NOAA Coral Reef Watch's own SST
+// anomaly legend: one solid color per band, no blending. Range -5..+5 C with a
+// distinct near-zero "normal" band (+/-0.2). Each entry's `upto` is the band's
+// exclusive upper edge; values below -5 or at/above +5 get the extreme caps.
+const ANOMALY_BANDS = [
+  { upto: -5.0, rgb: [  6,   0,   1] },  // < -5   extreme cold cap
+  { upto: -4.0, rgb: [115,   0, 105] },  // -5..-4 purple
+  { upto: -3.0, rgb: [ 77,  50, 175] },  // -4..-3 blue-violet
+  { upto: -2.0, rgb: [  0,  20, 192] },  // -3..-2 blue
+  { upto: -1.0, rgb: [  0,  95, 255] },  // -2..-1 bright blue
+  { upto: -0.2, rgb: [  0, 205, 255] },  // -1..-0.2 cyan
+  { upto:  0.2, rgb: [220, 220, 220] },  // -0.2..+0.2 normal (grey)
+  { upto:  1.0, rgb: [247, 230,   0] },  // +0.2..+1 yellow
+  { upto:  2.0, rgb: [240, 170,   0] },  // +1..+2 gold
+  { upto:  3.0, rgb: [245, 100,   0] },  // +2..+3 orange
+  { upto:  4.0, rgb: [235,  24,   0] },  // +3..+4 red
+  { upto:  5.0, rgb: [140,  16,   0] },  // +4..+5 dark red
+];
+const ANOMALY_OVER = [13, 0, 0];         // > +5   extreme warm cap
 function anomalyRGB(v){
-  const c = Math.max(-CLAMP, Math.min(CLAMP, v));
-  let r,g,b;
-  if(c<0){ const t=(c+CLAMP)/CLAMP; r=lerp(20,240,t); g=lerp(60,240,t); b=lerp(120,240,t); }
-  else { const t=c/CLAMP; r=lerp(240,190,t); g=lerp(240,30,t); b=lerp(240,30,t); }
-  return [r,g,b];
+  for(const b of ANOMALY_BANDS){ if(v < b.upto) return b.rgb; }
+  return ANOMALY_OVER;
+}
+
+// Render the legend strip from the same band list, so palette and key never drift.
+function buildLegend(){
+  const bar = document.getElementById('legendBar');
+  const colors = [...ANOMALY_BANDS.map(b => b.rgb), ANOMALY_OVER];
+  bar.innerHTML = colors.map(c => `<span style="background:rgb(${c[0]},${c[1]},${c[2]})"></span>`).join('');
 }
 
 // Build a globe texture directly from the extract_sst_anomaly.py JSON output.
@@ -144,8 +163,10 @@ function buildTextureFromData(data){
   }
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
+  // Linear when minified (globe zoomed out) to avoid shimmer, but Nearest when
+  // magnified so the discrete bands stay crisp instead of blending at cell edges.
   tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.NearestFilter;
   return tex;
 }
 
@@ -200,6 +221,7 @@ function initGlobe(){
     document.getElementById('fileInput').click();
   });
 
+  buildLegend();
   animate();
 }
 

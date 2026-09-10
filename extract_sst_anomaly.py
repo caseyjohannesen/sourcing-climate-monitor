@@ -141,8 +141,15 @@ def build_anomaly_json(sst_ds, clim_ds, step_deg):
 
     clim_slice = match_climatology(clim_ds, target_date)
 
-    # align climatology grid to the SST grid in case resolutions/labels differ slightly
-    clim_slice = clim_slice.interp(lat=latest.lat, lon=latest.lon, method="nearest")
+    # Nearest-align the coarser (1-deg) climatology onto the 0.25-deg SST grid.
+    # The LTM's coordinates are inset half a degree from the SST edges, so
+    # extrapolate at the boundary rather than returning NaN -- otherwise the
+    # first/last longitude columns (a seam at the prime meridian) and the polar
+    # rows come out empty.
+    clim_slice = clim_slice.interp(
+        lat=latest.lat, lon=latest.lon, method="nearest",
+        kwargs={"fill_value": "extrapolate"},
+    )
 
     anomaly = latest - clim_slice
 
@@ -180,7 +187,7 @@ def build_anomaly_json(sst_ds, clim_ds, step_deg):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--step", type=float, default=1.0, help="output grid spacing in degrees")
+    parser.add_argument("--step", type=float, default=0.5, help="output grid spacing in degrees (native OISST is 0.25)")
     parser.add_argument("--out", default="sst_anomaly.json")
     parser.add_argument("--sst-file", help="(testing) path to a local SST NetCDF instead of the live URL")
     parser.add_argument("--clim-file", help="(testing) path to a local climatology NetCDF instead of the live download")
