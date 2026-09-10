@@ -44,14 +44,22 @@ jobs:
       - name: Extract latest SST anomaly
         run: python extract_sst_anomaly.py --out sst_anomaly.json
 
-      - name: Commit refreshed data if it changed
+      - name: Commit refreshed data if the SST data changed
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add sst_anomaly.json
-          if git diff --cached --quiet; then
-            echo "sst_anomaly.json unchanged; nothing to commit."
+
+          # Decide whether to commit by comparing against the committed JSON while
+          # ignoring the volatile generated_at timestamp (which changes every run).
+          # Only a real change to the date or the anomaly grid should commit; a
+          # NOAA revision to the same date's grid still counts as a change.
+          if git cat-file -e HEAD:sst_anomaly.json 2>/dev/null \
+             && diff -q \
+                  <(git show HEAD:sst_anomaly.json | jq -S 'del(.generated_at)') \
+                  <(jq -S 'del(.generated_at)' sst_anomaly.json) >/dev/null; then
+            echo "SST data unchanged (only generated_at differs); nothing to commit."
           else
+            git add sst_anomaly.json
             git commit -m "Refresh SST anomaly ($(date -u +%Y-%m-%d))"
             git push
           fi
