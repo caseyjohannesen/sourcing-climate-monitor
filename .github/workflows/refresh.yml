@@ -28,7 +28,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install xarray netCDF4 pandas numpy requests
+        # scipy is required by xarray's .interp() call in extract_sst_anomaly.py
+        # (it's pulled in implicitly in many local envs, but not on a clean runner).
+        run: pip install xarray netCDF4 pandas numpy requests scipy
 
       # The 1991-2020 climatology (~90MB) never changes, so cache it across runs
       # instead of re-downloading from NOAA every day. Runners are ephemeral, so
