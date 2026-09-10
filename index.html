@@ -66,6 +66,22 @@
   .country-panel .cp-row .v{color:var(--paper);font-family:'Fraunces',serif;white-space:nowrap;}
   .country-panel .cp-msg{color:var(--muted);font-size:12px;padding:6px 0;}
   .country-panel .cp-note{margin-top:10px;font-size:10px;color:var(--muted);line-height:1.4;}
+
+  .region-panel{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:496px;max-width:calc(100% - 40px);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,0.35);}
+  .region-panel.hidden{display:none;}
+  .region-panel .rp-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
+  .region-panel .rp-title{font-family:'Fraunces',serif;font-size:15px;color:var(--paper);}
+  .region-panel .rp-close{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;}
+  .region-panel .rp-close:hover{color:var(--gold);}
+  .region-panel .rp-map{display:block;width:480px;max-width:100%;height:auto;border-radius:4px;background:#0b2124;cursor:crosshair;touch-action:none;}
+  .region-panel .rp-hint{font-size:11px;color:var(--muted);margin:8px 0 6px;}
+  .region-panel .rp-stats{min-height:44px;}
+  .region-panel .rp-stats .rp-mean{font-family:'Fraunces',serif;font-size:22px;color:var(--gold);}
+  .region-panel .rp-stats .rp-mean-lbl{font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:var(--muted);}
+  .region-panel .rp-stats .rp-sub{font-size:11px;color:var(--muted);margin-top:2px;}
+  .region-panel .rp-stats .rp-msg{font-size:12px;color:var(--muted);}
+  .region-panel .rp-clear{margin-top:8px;background:var(--panel-2);border:1px solid var(--line);color:var(--paper);padding:5px 11px;border-radius:5px;font-size:12px;cursor:pointer;font-family:inherit;}
+  .region-panel .rp-clear:hover{border-color:var(--gold);}
 </style>
 </head>
 <body>
@@ -78,7 +94,8 @@
       </div>
       <div class="refresh">
         <span id="lastUpdated">—</span>
-        <button>Load data file</button>
+        <button id="regionBtn">Region average</button>
+        <button id="loadBtn">Load data file</button>
       </div>
     </div>
     <div class="enso-strip">
@@ -98,6 +115,16 @@
         <button class="cp-close" id="cpClose" aria-label="Close">×</button>
       </div>
       <div id="cpBody"></div>
+    </div>
+    <div class="region-panel hidden" id="regionPanel">
+      <div class="rp-head">
+        <span class="rp-title">Region average · SST anomaly</span>
+        <button class="rp-close" id="rpClose" aria-label="Close">×</button>
+      </div>
+      <canvas class="rp-map" id="regionMap" width="480" height="240"></canvas>
+      <div class="rp-hint">Drag a box on the map to average the SST anomaly inside it.</div>
+      <div class="rp-stats" id="rpStats"></div>
+      <button class="rp-clear" id="rpClear">Clear selection</button>
     </div>
     <div class="map-caption">Sea surface temperature anomaly · <span class="status" id="dataSource">no data loaded</span></div>
     <div class="legend">
@@ -161,7 +188,9 @@ function buildLegend(){
 // Cells the script marked null (land / no data) render as neutral grey --
 // since that mask comes straight from NOAA's own data, coastlines here are
 // real, not hand-drawn.
-function buildTextureFromData(data){
+// Rasterize the anomaly grid to an equirectangular canvas (north at top). Used
+// both for the globe texture and for the 2D region-selection map.
+function buildAnomalyCanvas(data){
   const lat = data.lat, lon = data.lon, grid = data.anomaly_c;
   const h = lat.length, w = lon.length;
   const canvas = document.createElement('canvas');
@@ -183,7 +212,11 @@ function buildTextureFromData(data){
     }
   }
   ctx.putImageData(img, 0, 0);
-  const tex = new THREE.CanvasTexture(canvas);
+  return canvas;
+}
+
+function buildTextureFromData(data){
+  const tex = new THREE.CanvasTexture(buildAnomalyCanvas(data));
   // Linear when minified (globe zoomed out) to avoid shimmer, but Nearest when
   // magnified so the discrete bands stay crisp instead of blending at cell edges.
   tex.minFilter = THREE.LinearFilter;
@@ -247,6 +280,151 @@ function segmentsFor(country, r){
   for(const poly of country.polys) for(const ring of poly) appendRing(ring, r, out);
   return out;
 }
+
+// ================= region average (flattened 2D box selection) =================
+let currentData = null;         // last-loaded anomaly JSON, for the region tool
+let regionSrc = null;           // cached equirectangular raster (rebuilt only on data change)
+let regionBox = null;           // LineSegments outline of the selection on the globe
+let regionSel = null;           // {latMin,latMax,lonMin,lonMax} or null
+const REGION_W = 480, REGION_H = 240;
+
+// Rebuild the cached raster; called on open / data change, NOT on every drag frame.
+function rebuildRegionSrc(){ regionSrc = currentData ? buildAnomalyCanvas(currentData) : null; }
+
+function renderRegionMap(){
+  const cv = document.getElementById('regionMap');
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, REGION_W, REGION_H);
+  if(!regionSrc){
+    document.getElementById('rpStats').innerHTML = '<span class="rp-msg">No data loaded yet.</span>';
+    return;
+  }
+  ctx.imageSmoothingEnabled = false;                 // keep the discrete bands crisp
+  ctx.drawImage(regionSrc, 0, 0, REGION_W, REGION_H);
+  if(regionSel){
+    // draw the current selection rectangle back onto the map
+    const x0 = (regionSel.lonMin + 180) / 360 * REGION_W;
+    const x1 = (regionSel.lonMax + 180) / 360 * REGION_W;
+    const y0 = (90 - regionSel.latMax) / 180 * REGION_H;   // latMax is the top edge
+    const y1 = (90 - regionSel.latMin) / 180 * REGION_H;
+    ctx.strokeStyle = '#D9A441';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  }
+}
+
+// convert a map pixel (0..REGION_W, 0..REGION_H) to lon/lat
+function mapPxToLonLat(px, py){
+  return [ (px / REGION_W) * 360 - 180, 90 - (py / REGION_H) * 180 ];
+}
+
+// cos(lat)-area-weighted mean of the anomaly over a lat/lon box
+function averageRegion(sel){
+  const lat = currentData.lat, lon = currentData.lon, grid = currentData.anomaly_c;
+  let wsum = 0, vsum = 0, count = 0, vmin = Infinity, vmax = -Infinity;
+  for(let i=0;i<lat.length;i++){
+    if(lat[i] < sel.latMin || lat[i] > sel.latMax) continue;
+    const wLat = Math.cos(lat[i] * Math.PI / 180);
+    const row = grid[i];
+    for(let j=0;j<lon.length;j++){
+      if(lon[j] < sel.lonMin || lon[j] > sel.lonMax) continue;
+      const v = row[j];
+      if(v === null || v === undefined) continue;
+      vsum += v * wLat; wsum += wLat; count++;
+      if(v < vmin) vmin = v; if(v > vmax) vmax = v;
+    }
+  }
+  return count ? { mean: vsum / wsum, min: vmin, max: vmax, count } : { count: 0 };
+}
+
+function fmtLon(v){ return Math.abs(v).toFixed(1) + (v < 0 ? '°W' : '°E'); }
+function fmtLat(v){ return Math.abs(v).toFixed(1) + (v < 0 ? '°S' : '°N'); }
+function signed(v){ return (v >= 0 ? '+' : '') + v.toFixed(2); }
+
+function updateRegionStats(){
+  const el = document.getElementById('rpStats');
+  if(!regionSel){ el.innerHTML = '<span class="rp-msg">Drag a box on the map above.</span>'; return; }
+  const s = regionSel, r = averageRegion(s);
+  const bounds = `${fmtLon(s.lonMin)}–${fmtLon(s.lonMax)}, ${fmtLat(s.latMin)}–${fmtLat(s.latMax)}`;
+  if(!r.count){ el.innerHTML = `<span class="rp-msg">No ocean cells in ${bounds} (all land / no data).</span>`; return; }
+  el.innerHTML =
+    `<div class="rp-mean">${signed(r.mean)} °C<span class="rp-mean-lbl"> mean anomaly</span></div>` +
+    `<div class="rp-sub">min ${signed(r.min)} · max ${signed(r.max)} · ${r.count} cells (area-weighted)</div>` +
+    `<div class="rp-sub">${bounds}</div>`;
+}
+
+// subdivide one edge (a->b, each [lon,lat]) into short segments hugging the sphere.
+// Unlike appendRing there's no antimeridian guard: box edges follow constant
+// lat/lon and never wrap, so a box wider than 180 deg must still draw fully.
+function pushEdge(out, a, b, r){
+  const dl = b[0]-a[0], db = b[1]-a[1];
+  const n = Math.max(1, Math.ceil(Math.max(Math.abs(dl), Math.abs(db)) / 2));
+  let p = lonLatToVec3(a[0], a[1], r);
+  for(let k=1;k<=n;k++){
+    const t = k/n;
+    const q = lonLatToVec3(a[0]+dl*t, a[1]+db*t, r);
+    out.push(p.x,p.y,p.z, q.x,q.y,q.z);
+    p = q;
+  }
+}
+
+// outline the selected box on the globe as lat/lon edges (via lonLatToVec3)
+function updateRegionBox(){
+  if(!regionBox){
+    regionBox = new THREE.LineSegments(new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({color:0xD9A441}));
+    globe.add(regionBox);
+  }
+  regionBox.geometry.dispose();
+  const g = new THREE.BufferGeometry();
+  if(regionSel){
+    const s = regionSel, r = GLOBE_R * 1.004, out = [];
+    pushEdge(out, [s.lonMin,s.latMin], [s.lonMax,s.latMin], r);
+    pushEdge(out, [s.lonMax,s.latMin], [s.lonMax,s.latMax], r);
+    pushEdge(out, [s.lonMax,s.latMax], [s.lonMin,s.latMax], r);
+    pushEdge(out, [s.lonMin,s.latMax], [s.lonMin,s.latMin], r);
+    g.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
+  }
+  regionBox.geometry = g;
+  regionBox.visible = !!regionSel;
+}
+
+function setRegionSelection(sel){
+  regionSel = sel;
+  renderRegionMap();
+  updateRegionStats();
+  updateRegionBox();
+}
+
+// drag-to-draw on the 2D map
+let regionDragging = false, regionStart = null;
+function regionMapXY(e){
+  const rect = document.getElementById('regionMap').getBoundingClientRect();
+  return [ Math.max(0, Math.min(REGION_W, (e.clientX-rect.left) / rect.width * REGION_W)),
+           Math.max(0, Math.min(REGION_H, (e.clientY-rect.top) / rect.height * REGION_H)) ];
+}
+function onRegionDown(e){ regionDragging = true; regionStart = regionMapXY(e); e.preventDefault(); }
+function onRegionMove(e){
+  if(!regionDragging) return;
+  const [x1,y1] = regionMapXY(e), [x0,y0] = regionStart;
+  const [lonA,latA] = mapPxToLonLat(x0, y0), [lonB,latB] = mapPxToLonLat(x1, y1);
+  setRegionSelection({
+    lonMin: Math.min(lonA,lonB), lonMax: Math.max(lonA,lonB),
+    latMin: Math.min(latA,latB), latMax: Math.max(latA,latB),
+  });
+}
+function onRegionUp(){ regionDragging = false; }
+
+function openRegionPanel(){
+  document.getElementById('regionPanel').classList.remove('hidden');
+  rebuildRegionSrc();
+  renderRegionMap();
+  updateRegionStats();
+}
+function closeRegionPanel(){
+  document.getElementById('regionPanel').classList.add('hidden');
+}
+// ================= end region average =================
 
 // Borders are optional: if the fetch fails (file://, or a first-run miss) the
 // globe still works, just without the overlay.
@@ -420,7 +598,7 @@ function initGlobe(){
 
   document.getElementById('fileInput').addEventListener('change', onFileChosen);
   document.getElementById('lastUpdated').textContent = '';
-  document.querySelector('.refresh button').addEventListener('click', () => {
+  document.getElementById('loadBtn').addEventListener('click', () => {
     document.getElementById('fileInput').click();
   });
 
@@ -429,6 +607,19 @@ function initGlobe(){
   document.getElementById('cpClose').addEventListener('click', () => {
     document.getElementById('countryPanel').classList.add('hidden');
   });
+
+  // region-average tool
+  document.getElementById('regionBtn').addEventListener('click', () => {
+    const panel = document.getElementById('regionPanel');
+    panel.classList.contains('hidden') ? openRegionPanel() : closeRegionPanel();
+  });
+  document.getElementById('rpClose').addEventListener('click', closeRegionPanel);
+  document.getElementById('rpClear').addEventListener('click', () => setRegionSelection(null));
+  const rmap = document.getElementById('regionMap');
+  rmap.addEventListener('pointerdown', onRegionDown);
+  window.addEventListener('pointermove', onRegionMove);
+  window.addEventListener('pointerup', onRegionUp);
+
   animate();
 }
 
@@ -440,11 +631,13 @@ function applyData(data, updatedLabel){
     document.getElementById('dataSource').textContent = 'data is missing expected fields (lat/lon/anomaly_c)';
     return false;
   }
+  currentData = data;
   globeMesh.material.map = buildTextureFromData(data);
   globeMesh.material.needsUpdate = true;
   document.getElementById('dataSource').textContent = `${data.date || 'unknown date'} — ${data.source || 'source unspecified'}`;
   document.getElementById('lastUpdated').textContent = updatedLabel;
   document.getElementById('uploader').classList.add('hidden');
+  if(!document.getElementById('regionPanel').classList.contains('hidden')){ rebuildRegionSrc(); renderRegionMap(); }
   return true;
 }
 
