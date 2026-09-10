@@ -53,6 +53,19 @@
   .uploader-btn{display:inline-block;background:var(--gold);color:var(--ink);font-size:13px;font-weight:600;padding:8px 16px;border-radius:6px;cursor:pointer;}
   .uploader-btn input{display:none;}
   .uploader.hidden{display:none;}
+
+  .country-label{position:fixed;pointer-events:none;z-index:6;background:rgba(15,42,46,0.92);border:1px solid var(--line);color:var(--paper);font-size:11px;padding:3px 7px;border-radius:4px;transform:translate(12px,12px);display:none;}
+  .country-panel{position:absolute;top:14px;left:20px;width:248px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,0.35);}
+  .country-panel.hidden{display:none;}
+  .country-panel .cp-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:8px;}
+  .country-panel .cp-name{font-family:'Fraunces',serif;font-size:16px;color:var(--paper);}
+  .country-panel .cp-close{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;}
+  .country-panel .cp-close:hover{color:var(--gold);}
+  .country-panel .cp-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid var(--line);font-size:12px;}
+  .country-panel .cp-row .k{color:var(--muted);}
+  .country-panel .cp-row .v{color:var(--paper);font-family:'Fraunces',serif;white-space:nowrap;}
+  .country-panel .cp-msg{color:var(--muted);font-size:12px;padding:6px 0;}
+  .country-panel .cp-note{margin-top:10px;font-size:10px;color:var(--muted);line-height:1.4;}
 </style>
 </head>
 <body>
@@ -77,7 +90,15 @@
   </header>
 
   <div class="body" id="mapWrap">
-    <div class="map-hint">Drag to rotate · scroll to zoom</div>
+    <div class="map-hint">Drag to rotate · scroll to zoom · click a country for details</div>
+    <div class="country-label" id="countryLabel"></div>
+    <div class="country-panel hidden" id="countryPanel">
+      <div class="cp-head">
+        <span class="cp-name" id="cpName">—</span>
+        <button class="cp-close" id="cpClose" aria-label="Close">×</button>
+      </div>
+      <div id="cpBody"></div>
+    </div>
     <div class="map-caption">Sea surface temperature anomaly · <span class="status" id="dataSource">no data loaded</span></div>
     <div class="legend">
       <div class="title">SST anomaly (°C)</div>
@@ -185,6 +206,188 @@ let scene, camera, renderer, globe, globeMesh;
 let dragging=false, lastX=0, lastY=0, rotY=0, rotX=-0.15, autoRotate=true;
 const GLOBE_R = 1.4;
 
+// ================= country boundaries + hover / drill-down =================
+const BORDER_R = GLOBE_R * 1.003;              // just above the globe to avoid z-fighting
+let countries = null;                          // [{name, admin, labelX, labelY, bbox:[w,s,e,n], polys}]
+let baseBorders = null, highlightLine = null, hoveredCountry = null;
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+
+// Place a lon/lat on the sphere using the SAME mapping the SST texture uses, so
+// borders line up with the data (verified against the land mask offline).
+function lonLatToVec3(lon, lat, r){
+  const phi = ((lon + 180) / 360) * 2 * Math.PI;
+  const theta = ((90 - lat) / 180) * Math.PI;
+  const st = Math.sin(theta);
+  return new THREE.Vector3(-r*Math.cos(phi)*st, r*Math.cos(theta), r*Math.sin(phi)*st);
+}
+
+// Append a ring as line-segment pairs, subdividing long edges so they hug the sphere.
+function appendRing(ring, r, out){
+  let prev = null;
+  for(const p of ring){
+    if(prev){
+      const dl = Math.abs(p[0]-prev[0]), db = Math.abs(p[1]-prev[1]);
+      if(Math.max(dl, db) < 180){            // skip antimeridian-wrap artifacts
+        const n = Math.max(1, Math.ceil(Math.max(dl, db)));
+        let a = lonLatToVec3(prev[0], prev[1], r);
+        for(let k=1;k<=n;k++){
+          const t = k/n;
+          const b = lonLatToVec3(prev[0]+(p[0]-prev[0])*t, prev[1]+(p[1]-prev[1])*t, r);
+          out.push(a.x,a.y,a.z, b.x,b.y,b.z);
+          a = b;
+        }
+      }
+    }
+    prev = p;
+  }
+}
+function segmentsFor(country, r){
+  const out = [];
+  for(const poly of country.polys) for(const ring of poly) appendRing(ring, r, out);
+  return out;
+}
+
+// Borders are optional: if the fetch fails (file://, or a first-run miss) the
+// globe still works, just without the overlay.
+function loadCountries(){
+  fetch('./countries.geojson', {cache: 'force-cache'})
+    .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(buildCountries)
+    .catch(() => {});
+}
+function buildCountries(geo){
+  countries = [];
+  const segs = [];
+  for(const f of geo.features){
+    const g = f.geometry; if(!g) continue;
+    const polys = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
+    let w=180, s=90, e=-180, n=-90;
+    for(const poly of polys) for(const ring of poly) for(const pt of ring){
+      if(pt[0]<w)w=pt[0]; if(pt[0]>e)e=pt[0]; if(pt[1]<s)s=pt[1]; if(pt[1]>n)n=pt[1];
+    }
+    countries.push({ name:f.properties.NAME, admin:f.properties.ADMIN,
+                     labelX:f.properties.LABEL_X, labelY:f.properties.LABEL_Y,
+                     bbox:[w,s,e,n], polys });
+    for(const poly of polys) for(const ring of poly) appendRing(ring, BORDER_R, segs);
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
+  baseBorders = new THREE.LineSegments(geom,
+    new THREE.LineBasicMaterial({color:0x0b1f22, transparent:true, opacity:0.6}));
+  globe.add(baseBorders);
+  highlightLine = new THREE.LineSegments(new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({color:0xD9A441}));
+  highlightLine.visible = false;
+  globe.add(highlightLine);
+}
+
+// ray-casting point-in-polygon, handling holes (ring 0 = outer) and MultiPolygons
+function pointInRing(lon, lat, ring){
+  let inside = false;
+  for(let i=0, j=ring.length-1; i<ring.length; j=i++){
+    const xi=ring[i][0], yi=ring[i][1], xj=ring[j][0], yj=ring[j][1];
+    if(((yi>lat)!==(yj>lat)) && (lon < (xj-xi)*(lat-yi)/(yj-yi)+xi)) inside = !inside;
+  }
+  return inside;
+}
+function pointInPolygon(lon, lat, poly){
+  if(!pointInRing(lon, lat, poly[0])) return false;
+  for(let k=1;k<poly.length;k++) if(pointInRing(lon, lat, poly[k])) return false;
+  return true;
+}
+function countryAt(lon, lat){
+  if(!countries) return null;
+  for(const c of countries){
+    const b = c.bbox;
+    if(lon<b[0] || lon>b[2] || lat<b[1] || lat>b[3]) continue;   // cheap bbox reject
+    for(const poly of c.polys) if(pointInPolygon(lon, lat, poly)) return c;
+  }
+  return null;
+}
+
+// Raycast the globe at a screen position and return the country there (or null).
+// Uses the hit's UV, so it's correct regardless of the globe's current rotation.
+function pickCountryAt(clientX, clientY){
+  if(!countries || !globeMesh) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNDC.x = ((clientX-rect.left)/rect.width)*2 - 1;
+  pointerNDC.y = -((clientY-rect.top)/rect.height)*2 + 1;
+  raycaster.setFromCamera(pointerNDC, camera);
+  const hit = raycaster.intersectObject(globeMesh)[0];
+  if(!hit || !hit.uv) return null;
+  return countryAt(hit.uv.x*360 - 180, hit.uv.y*180 - 90);
+}
+
+function setHoveredCountry(c, clientX, clientY){
+  const label = document.getElementById('countryLabel');
+  if(c !== hoveredCountry){
+    hoveredCountry = c;
+    if(highlightLine){
+      highlightLine.geometry.dispose();
+      const g = new THREE.BufferGeometry();
+      if(c) g.setAttribute('position', new THREE.Float32BufferAttribute(segmentsFor(c, BORDER_R*1.001), 3));
+      highlightLine.geometry = g;
+      highlightLine.visible = !!c;
+    }
+  }
+  if(c){
+    label.textContent = c.admin || c.name;
+    label.style.left = clientX + 'px';
+    label.style.top = clientY + 'px';
+    label.style.display = 'block';
+    renderer.domElement.style.cursor = 'pointer';
+  } else {
+    label.style.display = 'none';
+    if(!dragging) renderer.domElement.style.cursor = '';
+  }
+}
+
+// ---- click drill-down: country conditions from Open-Meteo (no key, CORS-ok) ----
+function openCountryPanel(c){
+  const panel = document.getElementById('countryPanel');
+  const body = document.getElementById('cpBody');
+  document.getElementById('cpName').textContent = c.admin || c.name;
+  panel.classList.remove('hidden');
+  if(c.labelX == null || c.labelY == null){
+    body.innerHTML = '<div class="cp-msg">No location point available for this country.</div>';
+    return;
+  }
+  body.innerHTML = '<div class="cp-msg">Loading current conditions…</div>';
+  const url = 'https://api.open-meteo.com/v1/forecast'
+    + '?latitude=' + c.labelY + '&longitude=' + c.labelX
+    + '&current=temperature_2m,precipitation'
+    + '&hourly=soil_moisture_0_to_1cm,soil_moisture_3_to_9cm&timezone=auto&forecast_days=1';
+  fetch(url)
+    .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(d => renderCountryPanel(c, d))
+    .catch(e => { body.innerHTML = '<div class="cp-msg">Could not load conditions: ' + e.message + '</div>'; });
+}
+function fmt(v, unit){ return (v == null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100 + unit); }
+function cpRow(k, v){ return '<div class="cp-row"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>'; }
+function renderCountryPanel(c, d){
+  const body = document.getElementById('cpBody');
+  const cur = d.current || {};
+  // soil moisture is hourly-only; take the hour matching "now"
+  let idx = 0;
+  if(d.hourly && d.hourly.time && cur.time){
+    const hh = cur.time.slice(0, 13);
+    const f = d.hourly.time.findIndex(t => t.slice(0, 13) === hh);
+    if(f >= 0) idx = f;
+  }
+  const sm0 = d.hourly && d.hourly.soil_moisture_0_to_1cm ? d.hourly.soil_moisture_0_to_1cm[idx] : null;
+  const sm3 = d.hourly && d.hourly.soil_moisture_3_to_9cm ? d.hourly.soil_moisture_3_to_9cm[idx] : null;
+  body.innerHTML =
+    cpRow('Air temperature', fmt(cur.temperature_2m, ' °C')) +
+    cpRow('Precipitation', fmt(cur.precipitation, ' mm')) +
+    cpRow('Soil moisture 0–1 cm', fmt(sm0, ' m³/m³')) +
+    cpRow('Soil moisture 3–9 cm', fmt(sm3, ' m³/m³')) +
+    '<div class="cp-note">Open-Meteo, sampled at the country label point ('
+      + (+c.labelY).toFixed(1) + ', ' + (+c.labelX).toFixed(1)
+      + ') — indicative, not a country-wide average.</div>';
+}
+// ================= end country boundaries =================
+
 function initGlobe(){
   const wrap = document.getElementById('mapWrap');
   scene = new THREE.Scene();
@@ -222,6 +425,10 @@ function initGlobe(){
   });
 
   buildLegend();
+  loadCountries();
+  document.getElementById('cpClose').addEventListener('click', () => {
+    document.getElementById('countryPanel').classList.add('hidden');
+  });
   animate();
 }
 
@@ -270,16 +477,29 @@ function onFileChosen(e){
   reader.readAsText(file);
 }
 
-let downX=0, downY=0, moved=0;
-function onPointerDown(e){ dragging=true; autoRotate=false; lastX=e.clientX; lastY=e.clientY; renderer.domElement.classList.add('dragging'); }
+let moved=0;
+function onPointerDown(e){ dragging=true; autoRotate=false; lastX=e.clientX; lastY=e.clientY; moved=0; renderer.domElement.classList.add('dragging'); }
 function onPointerMove(e){
-  if(!dragging) return;
-  const dx = e.clientX-lastX, dy = e.clientY-lastY;
-  rotY += dx*0.005;
-  rotX = Math.max(-1.2, Math.min(1.2, rotX + dy*0.005));
-  lastX = e.clientX; lastY = e.clientY;
+  if(dragging){
+    const dx = e.clientX-lastX, dy = e.clientY-lastY;
+    moved += Math.abs(dx)+Math.abs(dy);
+    rotY += dx*0.005;
+    rotX = Math.max(-1.2, Math.min(1.2, rotX + dy*0.005));
+    lastX = e.clientX; lastY = e.clientY;
+    return;
+  }
+  // not dragging: highlight the country under the cursor
+  setHoveredCountry(pickCountryAt(e.clientX, e.clientY), e.clientX, e.clientY);
 }
-function onPointerUp(){ dragging=false; renderer.domElement.classList.remove('dragging'); }
+function onPointerUp(e){
+  const wasDragging = dragging;
+  dragging=false; renderer.domElement.classList.remove('dragging');
+  // treat a press that barely moved as a click, not a drag
+  if(wasDragging && moved < 6 && e){
+    const c = pickCountryAt(e.clientX, e.clientY);
+    if(c) openCountryPanel(c);
+  }
+}
 function onWheel(e){ e.preventDefault(); camera.position.z = Math.max(2.1, Math.min(6, camera.position.z + e.deltaY*0.0025)); }
 function onResize(){
   const wrap = document.getElementById('mapWrap');
