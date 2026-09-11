@@ -41,10 +41,24 @@ inspection.
 ### Clicking a country
 
 Clicking a country flies the view to it — rotating and dollying the globe, or
-panning and zooming the flat map — and loads that country's admin-1 district
-boundaries. Hovering then names the district under the cursor. **Back to world
-view** (or Esc, or closing the panel) drops the district detail and flies back
-out; dragging or scrolling takes over at any point.
+panning and zooming the flat map — loads that country's admin-1 district
+boundaries, and shows its **area-averaged** air temperature, precipitation and
+soil moisture. Clicking again inside a district drills down to that district's
+own average. Esc steps back out one level at a time (district → country → world),
+as does the back link in the panel; dragging or scrolling takes over at any point.
+
+The averages come from Open-Meteo, which accepts many coordinates in one request
+and exposes soil moisture as a `current` variable — so one request per selection
+covers the whole region. Sample points are laid on a lat/lon grid inside the
+polygon and **cos(lat)-weighted**, since a regular lon/lat grid over-samples
+toward the poles. `timezone=GMT` is deliberate: with `timezone=auto` each point
+resolves to its own local clock, so averaging a wide country would mix local
+morning with local evening, and the mean would mean nothing.
+
+This is a 25-point sample of a weather model, not an areal integral — dense for
+Ghana, coarse for Russia — so the panel always states the point count rather than
+letting "average" imply more than it is. Results are cached per country and per
+district, and requests are strictly click-driven.
 
 Note these files are fetched with `cache: 'default'`, deliberately not
 `force-cache`: the latter returns a cached match *fresh or stale* and never

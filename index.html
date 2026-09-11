@@ -69,6 +69,9 @@
   .country-panel.hidden{display:none;}
   .country-panel .cp-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:8px;}
   .country-panel .cp-name{font-family:'Fraunces',serif;font-size:16px;color:var(--paper);}
+  .country-panel .cp-back{display:block;background:none;border:none;color:var(--muted);font-size:11px;padding:0 0 6px 0;cursor:pointer;font-family:inherit;text-align:left;}
+  .country-panel .cp-back:hover{color:var(--gold);}
+  .country-panel .cp-back.hidden{display:none;}
   .country-panel .cp-close{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;}
   .country-panel .cp-close:hover{color:var(--gold);}
   .country-panel .cp-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid var(--line);font-size:12px;}
@@ -122,6 +125,7 @@
     <div class="map-hint" id="mapHint">Drag to rotate · scroll to zoom · click a country for details</div>
     <div class="country-label" id="countryLabel"></div>
     <div class="country-panel hidden" id="countryPanel">
+      <button class="cp-back hidden" id="cpBack"></button>
       <div class="cp-head">
         <span class="cp-name" id="cpName">—</span>
         <button class="cp-close" id="cpClose" aria-label="Close">×</button>
@@ -1079,48 +1083,172 @@ function setHoveredCountry(c, clientX, clientY, ll){
   }
 }
 
-// ---- click drill-down: country conditions from Open-Meteo (no key, CORS-ok) ----
-function openCountryPanel(c){
-  const panel = document.getElementById('countryPanel');
-  const body = document.getElementById('cpBody');
-  document.getElementById('cpName').textContent = c.admin || c.name;
-  panel.classList.remove('hidden');
-  if(c.labelX == null || c.labelY == null){
-    body.innerHTML = '<div class="cp-msg">No location point available for this country.</div>';
-    return;
+// ---- click drill-down: area-averaged conditions from Open-Meteo -------------
+// Open-Meteo accepts many coordinates in one request and returns an array, and
+// it exposes soil moisture as a `current` variable, so one request per selection
+// is enough to average a region rather than sample a single point.
+//
+// What this is: a cos(lat)-weighted mean of a weather model at SAMPLE_BUDGET
+// points inside the polygon. It is not an areal integral -- for Ghana the
+// sampling is dense, for Russia it is coarse -- so the panel always shows how
+// many points went into the number rather than letting "average" imply more.
+const SAMPLE_BUDGET = 25;
+const conditionsCache = new Map();     // key -> averaged reading
+let selectedDistrict = null;
+let districtHighlight = null;
+let conditionsSeq = 0;                 // guards against a slow response landing late
+
+// Points on a regular lat/lon grid that fall inside the polygon. Regular in
+// lon/lat means each point stands for an area proportional to cos(lat), which is
+// what the weighting below corrects for.
+function samplePointsIn(polys, bbox, budget){
+  const [w, s, e, n] = bbox;
+  const midCos = Math.max(0.05, Math.cos((s + n) / 2 * DEG));
+  let pts = [];
+  // Refine until enough points land inside -- a thin or ragged district can miss
+  // a coarse grid entirely.
+  for(let attempt = 0; attempt < 5 && pts.length < budget; attempt++){
+    const cells = budget * 4 * Math.pow(4, attempt);
+    const aspect = Math.max(1e-6, (e - w) * midCos) / Math.max(1e-6, n - s);
+    const ny = Math.max(2, Math.round(Math.sqrt(cells / aspect)));
+    const nx = Math.max(2, Math.round(ny * aspect));
+    pts = [];
+    for(let j = 0; j < ny; j++){
+      const lat = s + (n - s) * (j + 0.5) / ny;
+      for(let i = 0; i < nx; i++){
+        const lon = w + (e - w) * (i + 0.5) / nx;
+        for(const poly of polys){
+          if(pointInPolygon(lon, lat, poly)){ pts.push([lon, lat]); break; }
+        }
+      }
+    }
   }
-  body.innerHTML = '<div class="cp-msg">Loading current conditions…</div>';
-  const url = 'https://api.open-meteo.com/v1/forecast'
-    + '?latitude=' + c.labelY + '&longitude=' + c.labelX
-    + '&current=temperature_2m,precipitation'
-    + '&hourly=soil_moisture_0_to_1cm,soil_moisture_3_to_9cm&timezone=auto&forecast_days=1';
-  fetch(url)
-    .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-    .then(d => renderCountryPanel(c, d))
-    .catch(e => { body.innerHTML = '<div class="cp-msg">Could not load conditions: ' + e.message + '</div>'; });
+  if(pts.length > budget){                       // thin evenly, keeping the spread
+    const stride = pts.length / budget, thinned = [];
+    for(let i = 0; i < budget; i++) thinned.push(pts[Math.floor(i * stride)]);
+    pts = thinned;
+  }
+  return pts;
 }
+
+const COND_VARS = ['temperature_2m', 'precipitation', 'soil_moisture_0_to_1cm', 'soil_moisture_3_to_9cm'];
+
+function fetchConditions(pts){
+  const lat = pts.map(p => p[1].toFixed(4)).join(',');
+  const lon = pts.map(p => p[0].toFixed(4)).join(',');
+  // timezone=GMT on purpose: with timezone=auto each point resolves to its own
+  // local clock, so averaging a wide country would mix local morning with local
+  // evening. GMT makes this a snapshot at one instant, which is the only thing
+  // an average across a region can honestly mean.
+  const url = 'https://api.open-meteo.com/v1/forecast'
+    + '?latitude=' + lat + '&longitude=' + lon
+    + '&current=' + COND_VARS.join(',')
+    + '&timezone=GMT&forecast_days=1';
+  return fetch(url)
+    .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(raw => averageConditions(Array.isArray(raw) ? raw : [raw], pts));
+}
+
+// cos(lat)-weighted mean of each variable, skipping points the model had no
+// value for (rare, but a coastal sample can come back null).
+function averageConditions(results, pts){
+  const acc = {}, wsum = {};
+  for(const v of COND_VARS){ acc[v] = 0; wsum[v] = 0; }
+  let used = 0;
+  results.forEach((r, i) => {
+    const cur = r && r.current;
+    if(!cur) return;
+    const lat = (r.latitude != null) ? r.latitude : (pts[i] ? pts[i][1] : 0);
+    const wLat = Math.cos(lat * DEG);
+    let any = false;
+    for(const v of COND_VARS){
+      const x = cur[v];
+      if(x == null || Number.isNaN(x)) continue;
+      acc[v] += x * wLat; wsum[v] += wLat; any = true;
+    }
+    if(any) used++;
+  });
+  const out = { points: used, time: results[0] && results[0].current && results[0].current.time };
+  for(const v of COND_VARS) out[v] = wsum[v] ? acc[v] / wsum[v] : null;
+  return out;
+}
+
 function fmt(v, unit){ return (v == null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100 + unit); }
 function cpRow(k, v){ return '<div class="cp-row"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>'; }
-function renderCountryPanel(c, d){
+
+// Shared by the country and district panels: sample, fetch, average, render.
+function showConditions(key, label, polys, bbox, backLabel){
+  const panel = document.getElementById('countryPanel');
   const body = document.getElementById('cpBody');
-  const cur = d.current || {};
-  // soil moisture is hourly-only; take the hour matching "now"
-  let idx = 0;
-  if(d.hourly && d.hourly.time && cur.time){
-    const hh = cur.time.slice(0, 13);
-    const f = d.hourly.time.findIndex(t => t.slice(0, 13) === hh);
-    if(f >= 0) idx = f;
+  document.getElementById('cpName').textContent = label;
+  panel.classList.remove('hidden');
+
+  const back = document.getElementById('cpBack');
+  back.textContent = backLabel ? '← ' + backLabel : '';
+  back.classList.toggle('hidden', !backLabel);
+
+  const pts = samplePointsIn(polys, bbox, SAMPLE_BUDGET);
+  if(!pts.length){
+    body.innerHTML = '<div class="cp-msg">This area is too small to sample.</div>';
+    return;
   }
-  const sm0 = d.hourly && d.hourly.soil_moisture_0_to_1cm ? d.hourly.soil_moisture_0_to_1cm[idx] : null;
-  const sm3 = d.hourly && d.hourly.soil_moisture_3_to_9cm ? d.hourly.soil_moisture_3_to_9cm[idx] : null;
-  body.innerHTML =
-    cpRow('Air temperature', fmt(cur.temperature_2m, ' °C')) +
-    cpRow('Precipitation', fmt(cur.precipitation, ' mm')) +
-    cpRow('Soil moisture 0–1 cm', fmt(sm0, ' m³/m³')) +
-    cpRow('Soil moisture 3–9 cm', fmt(sm3, ' m³/m³')) +
-    '<div class="cp-note">Open-Meteo, sampled at the country label point ('
-      + (+c.labelY).toFixed(1) + ', ' + (+c.labelX).toFixed(1)
-      + ') — indicative, not a country-wide average.</div>';
+  if(conditionsCache.has(key)){ renderConditions(conditionsCache.get(key), pts.length); return; }
+
+  body.innerHTML = `<div class="cp-msg">Averaging ${pts.length} points…</div>`;
+  const seq = ++conditionsSeq;
+  fetchConditions(pts)
+    .then(avg => {
+      conditionsCache.set(key, avg);
+      if(seq === conditionsSeq) renderConditions(avg, pts.length);
+    })
+    .catch(e => {
+      if(seq === conditionsSeq){
+        body.innerHTML = '<div class="cp-msg">Could not load conditions: ' + e.message + '</div>';
+      }
+    });
+}
+
+function renderConditions(a, requested){
+  document.getElementById('cpBody').innerHTML =
+    cpRow('Air temperature', fmt(a.temperature_2m, ' °C')) +
+    cpRow('Precipitation', fmt(a.precipitation, ' mm')) +
+    cpRow('Soil moisture 0–1 cm', fmt(a.soil_moisture_0_to_1cm, ' m³/m³')) +
+    cpRow('Soil moisture 3–9 cm', fmt(a.soil_moisture_3_to_9cm, ' m³/m³')) +
+    '<div class="cp-note">Open-Meteo, area-weighted mean of ' + a.points + ' sample point'
+      + (a.points === 1 ? '' : 's') + (a.time ? ' at ' + a.time + ' UTC' : '')
+      + ' — a model sample, not an areal integral.</div>';
+}
+
+function openCountryPanel(c){
+  selectedDistrict = null;
+  updateDistrictHighlight();
+  showConditions('country:' + (c.adm0 || c.name), c.admin || c.name, c.polys, c.bbox, null);
+}
+
+function selectDistrict(d, c){
+  selectedDistrict = d;
+  updateDistrictHighlight();
+  const name = d.name || 'District';
+  showConditions('district:' + (c.adm0 || c.name) + ':' + name,
+                 name + (d.type ? ' · ' + d.type : ''), d.polys, d.bbox, c.admin || c.name);
+}
+
+// Outline whichever district is selected, in gold, through the same morph
+// machinery as everything else so it survives the projection toggle.
+function updateDistrictHighlight(){
+  if(!districtHighlight){
+    if(!selectedDistrict) return;
+    districtHighlight = makeMorphLine(new THREE.LineBasicMaterial({color:0xD9A441}), ELEV_HIGHLIGHT);
+    world.add(districtHighlight);
+  }
+  if(selectedDistrict){
+    const segs = [];
+    for(const poly of selectedDistrict.polys) for(const ring of poly) appendRing(ring, segs);
+    if(segs.length) setLineLonLat(districtHighlight, segs);
+    districtHighlight.visible = segs.length > 0;
+  } else {
+    districtHighlight.visible = false;
+  }
 }
 // ================= end country boundaries =================
 
@@ -1309,6 +1437,8 @@ function clearFocus(){
   viewBeforeFocus = null;
   adminIso = null;
   adminDistricts = null;
+  selectedDistrict = null;
+  updateDistrictHighlight();
   if(adminLine) adminLine.visible = false;
   setHoveredCountry(null);
   updateFocusUI();
@@ -1368,7 +1498,9 @@ function showAdmin1(c){
 function renderAdmin1(iso, geo){
   if(!adminLine){
     adminLine = makeMorphLine(
-      new THREE.LineBasicMaterial({color:0x8FA6A8, transparent:true, opacity:0.75}), ELEV_ADMIN);
+      // dark enough to read over the warm end of the colour ramp, but still
+      // distinguishable from the near-black country borders beneath them
+      new THREE.LineBasicMaterial({color:0x14343A, transparent:true, opacity:0.9}), ELEV_ADMIN);
     world.add(adminLine);
   }
   const segs = [];
@@ -1443,6 +1575,9 @@ function initScene(){
   loadCountries();
   loadAdminIndex();
   document.getElementById('cpClose').addEventListener('click', exitToWorld);
+  document.getElementById('cpBack').addEventListener('click', () => {
+    if(focusedCountry) openCountryPanel(focusedCountry);
+  });
   document.getElementById('backBtn').addEventListener('click', exitToWorld);
 
   document.getElementById('projBtn').addEventListener('click', () => {
@@ -1460,7 +1595,12 @@ function initScene(){
   document.getElementById('rpClear').addEventListener('click', clearPolygon);
   canvas.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('keydown', (e) => {
-    if(e.key === 'Escape'){ focusedCountry ? exitToWorld() : clearPolygon(); }
+    // Esc steps out one level at a time: district -> country -> world -> polygon
+    if(e.key === 'Escape'){
+      if(selectedDistrict && focusedCountry) openCountryPanel(focusedCountry);
+      else if(focusedCountry) exitToWorld();
+      else clearPolygon();
+    }
     else if(e.key === 'Backspace' && polyPins.length){ e.preventDefault(); undoPin(); }
     else if(e.key === 'Enter' && !polyClosed && polyPins.length > 2) closePolygon();
   });
@@ -1581,8 +1721,15 @@ function onPointerUp(e){
   dragging=false; renderer.domElement.classList.remove('dragging');
   // treat a press that barely moved as a click, not a drag
   if(wasDragging && moved < 6 && e){
-    const c = pickCountryAt(e.clientX, e.clientY);
-    if(c){ openCountryPanel(c); focusCountry(c); }
+    const ll = unproject(e.clientX, e.clientY);
+    const c = ll && countries ? countryAt(ll[0], ll[1]) : null;
+    if(c){
+      // Already zoomed into this country with its districts loaded? Then a click
+      // inside one drills down to the district rather than re-selecting the country.
+      const d = (focusedCountry === c && adminDistricts) ? districtAt(ll[0], ll[1]) : null;
+      if(d) selectDistrict(d, c);
+      else { openCountryPanel(c); focusCountry(c); }
+    }
   }
 }
 function onWheel(e){
