@@ -1,6 +1,7 @@
-# Cached 1991-2020 climatology downloaded by extract_sst_anomaly.py (~90MB).
-# Never commit it: too large for git, and the workflow caches it separately.
-sst.day.ltm.1991-2020.nc
+# Cached 0.25-deg 1991-2020 climatology downloaded by extract_sst_anomaly.py
+# (~350MB). Never commit it: far too large for git, and the workflow caches it
+# separately. The older 1-deg sst.day.ltm.*.nc is covered by the *.nc rule below.
+sst.day.mean.ltm.1991-2020.nc
 *.nc
 *.nc.part
 

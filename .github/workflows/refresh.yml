@@ -28,38 +28,57 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        # scipy is required by xarray's .interp() call in extract_sst_anomaly.py
-        # (it's pulled in implicitly in many local envs, but not on a clean runner).
-        run: pip install xarray netCDF4 pandas numpy requests scipy
+        # No scipy: the highres climatology shares the daily field's 0.25 deg grid,
+        # so extract_sst_anomaly.py subtracts directly instead of interpolating.
+        run: pip install xarray netCDF4 pandas numpy requests pillow
 
-      # The 1991-2020 climatology (~90MB) never changes, so cache it across runs
-      # instead of re-downloading from NOAA every day. Runners are ephemeral, so
-      # without this the file would be fetched on every single run.
+      # The 1991-2020 climatology (~350MB at 0.25 deg) never changes, so cache it
+      # across runs instead of re-downloading from NOAA every day. Runners are
+      # ephemeral, so without this the file would be fetched on every single run.
+      # Key is versioned: it changed when we moved off the 1-degree baseline, and
+      # must change again if the cached file ever does.
       - name: Cache 1991-2020 climatology
         uses: actions/cache@v5
         with:
-          path: sst.day.ltm.1991-2020.nc
-          key: oisst-climatology-1991-2020-v1
+          path: sst.day.mean.ltm.1991-2020.nc
+          key: oisst-climatology-highres-1991-2020-v2
 
       - name: Extract latest SST anomaly
-        run: python extract_sst_anomaly.py --out sst_anomaly.json
+        run: python extract_sst_anomaly.py --out sst_anomaly.png
 
       - name: Commit refreshed data if the SST data changed
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Decide whether to commit by comparing against the committed JSON while
-          # ignoring the volatile generated_at timestamp (which changes every run).
-          # Only a real change to the date or the anomaly grid should commit; a
-          # NOAA revision to the same date's grid still counts as a change.
-          if git cat-file -e HEAD:sst_anomaly.json 2>/dev/null \
-             && diff -q \
-                  <(git show HEAD:sst_anomaly.json | jq -S 'del(.generated_at)') \
-                  <(jq -S 'del(.generated_at)' sst_anomaly.json) >/dev/null; then
+          # Only a real change should commit. The PNG holds the whole grid, so a
+          # byte compare settles it (the encoder is deterministic for identical
+          # input); the sidecar is compared separately with generated_at stripped,
+          # since that timestamp changes on every run. A NOAA revision to the same
+          # date's grid still counts as a change, via the PNG.
+          #
+          # The comparison runs through python rather than jq deliberately. With
+          # jq, a missing or erroring jq makes both sides of the diff empty, they
+          # compare equal, and a real change is silently skipped -- the failure
+          # mode points the wrong way. python is already installed above, and an
+          # error from it is a non-zero exit, which reads as "changed".
+          png_same=false; meta_same=false
+          if git cat-file -e HEAD:sst_anomaly.png 2>/dev/null \
+             && git show HEAD:sst_anomaly.png | cmp -s - sst_anomaly.png; then
+            png_same=true
+          fi
+          # (kept on one line: inside this block scalar an indented heredoc would
+          # reach python with leading whitespace and fail to parse)
+          if git show HEAD:sst_anomaly.meta.json > prev.meta.json 2>/dev/null \
+             && python -c "import json,sys; s=lambda p:{k:v for k,v in json.load(open(p)).items() if k!='generated_at'}; sys.exit(0 if s('prev.meta.json')==s('sst_anomaly.meta.json') else 1)"; then
+            meta_same=true
+          fi
+          rm -f prev.meta.json
+
+          if $png_same && $meta_same; then
             echo "SST data unchanged (only generated_at differs); nothing to commit."
           else
-            git add sst_anomaly.json
+            git add sst_anomaly.png sst_anomaly.meta.json
             git commit -m "Refresh SST anomaly ($(date -u +%Y-%m-%d))"
             git push
           fi

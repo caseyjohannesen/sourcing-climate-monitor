@@ -95,7 +95,7 @@
       <div class="refresh">
         <span id="lastUpdated">—</span>
         <button id="regionBtn">Region average</button>
-        <button id="loadBtn">Load data file</button>
+        <button id="loadBtn">Load data files</button>
       </div>
     </div>
     <div class="enso-strip">
@@ -135,8 +135,8 @@
     <div class="uploader" id="uploader">
       <div class="uploader-inner">
         <div class="uploader-title">Load SST anomaly data</div>
-        <div class="uploader-sub">Upload the sst_anomaly.json produced by extract_sst_anomaly.py</div>
-        <label class="uploader-btn">Choose file<input type="file" id="fileInput" accept="application/json" /></label>
+        <div class="uploader-sub">Select both sst_anomaly.png and sst_anomaly.meta.json, as produced by extract_sst_anomaly.py</div>
+        <label class="uploader-btn">Choose files<input type="file" id="fileInput" accept=".png,.json,image/png,application/json" multiple /></label>
       </div>
     </div>
   </div>
@@ -184,43 +184,132 @@ function buildLegend(){
   bar.innerHTML = colors.map(c => `<span style="background:rgb(${c[0]},${c[1]},${c[2]})"></span>`).join('');
 }
 
-// Build a globe texture directly from the extract_sst_anomaly.py JSON output.
-// Cells the script marked null (land / no data) render as neutral grey --
-// since that mask comes straight from NOAA's own data, coastlines here are
-// real, not hand-drawn.
-// Rasterize the anomaly grid to an equirectangular canvas (north at top). Used
-// both for the globe texture and for the 2D region-selection map.
-function buildAnomalyCanvas(data){
-  const lat = data.lat, lon = data.lon, grid = data.anomaly_c;
+// ================= anomaly grid =================
+// The data file is a quantized 8-bit PNG -- one pixel per grid cell, row 0 at
+// the north pole -- plus a small JSON sidecar carrying the grid geometry and a
+// 256-entry lookup table mapping pixel level back to degrees C. At 0.25 deg
+// that is ~250 KB instead of ~6.3 MB of JSON (~840 KB gzipped), and it decodes
+// into one Float32Array rather than a million boxed JS numbers in 720 arrays.
+//
+// Everything downstream -- the globe texture, the region tool -- reads through
+// this object, so it is the single seam between how the data is stored and what
+// the map does with it. Land and data gaps are NaN; the mask comes straight
+// from NOAA, so the coastlines it draws are real, not hand-drawn.
+function makeGrid(meta, values){
+  const g = meta.grid;
+  return {
+    meta, values,                       // Float32Array, NaN = no data
+    width: g.width, height: g.height, step: g.step_deg,
+    latMax: g.lat_max, latMin: g.lat_min, lonMin: g.lon_min, lonMax: g.lon_max,
+    date: meta.date, source: meta.source,
+    latAt(row){ return this.latMax - row * this.step; },
+    lonAt(col){ return this.lonMin + col * this.step; },
+    rowFor(lat){ return Math.round((this.latMax - lat) / this.step); },
+    colFor(lon){ return Math.round((lon - this.lonMin) / this.step); },
+    at(row, col){ return this.values[row * this.width + col]; },
+    // nearest-cell sample by coordinate; NaN on land or off-grid
+    sample(lon, lat){
+      const wrapped = ((lon + 180) % 360 + 360) % 360 - 180;
+      const r = this.rowFor(lat), c = this.colFor(wrapped);
+      if(r < 0 || r >= this.height || c < 0 || c >= this.width) return NaN;
+      return this.values[r * this.width + c];
+    },
+  };
+}
+
+// Decode a level-PNG through its sidecar lookup table into a Float32Array.
+function decodeAnomalyImage(img, meta){
+  const w = meta.grid.width, h = meta.grid.height;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d', {willReadFrequently:true});
+  ctx.drawImage(img, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  // The level lives in the red channel: canvas always hands back 8-bit RGBA
+  // whatever the source PNG was, and a greyscale PNG arrives with R=G=B. That
+  // 8-bit truncation is also why any scheme needing more precision would have
+  // to split bytes across R and G rather than ship a 16-bit PNG. And it is why
+  // the no-data mask is a reserved *level* rather than the alpha channel:
+  // canvas premultiplies alpha, which would corrupt the value wherever A < 255.
+  const lut = meta.encoding.lut.map(v => v === null ? NaN : v);
+  const out = new Float32Array(w * h);
+  for(let i = 0; i < out.length; i++) out[i] = lut[px[i*4]];
+  return makeGrid(meta, out);
+}
+
+// colorSpaceConversion:'none' matters here -- these pixels are data, not
+// colour, and a browser that "corrects" them would shift every value.
+function decodeBlob(blob){
+  if(window.createImageBitmap){
+    return createImageBitmap(blob, {colorSpaceConversion:'none', premultiplyAlpha:'none'});
+  }
+  return new Promise((res, rej) => {
+    const img = new Image(), url = URL.createObjectURL(blob);
+    img.onload  = () => { URL.revokeObjectURL(url); res(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('could not decode PNG')); };
+    img.src = url;
+  });
+}
+
+// Older single-file JSON (lat[]/lon[]/anomaly_c[][]) -> the same grid object,
+// so the manual uploader still accepts a file produced before the PNG switch.
+function gridFromLegacyJSON(data){
+  const lat = data.lat, lon = data.lon, rows = data.anomaly_c;
   const h = lat.length, w = lon.length;
+  const values = new Float32Array(w * h);
+  // legacy lat[] ascends south -> north; the grid wants row 0 at the north pole
+  for(let i=0;i<h;i++){
+    const src = rows[h - 1 - i];
+    for(let j=0;j<w;j++){
+      const v = src[j];
+      values[i*w + j] = (v === null || v === undefined) ? NaN : v;
+    }
+  }
+  const step = Math.abs(lat[1] - lat[0]);
+  return makeGrid({
+    date: data.date, source: data.source,
+    grid: {width:w, height:h, step_deg:step,
+           lat_max:lat[h-1], lat_min:lat[0], lon_min:lon[0], lon_max:lon[w-1]},
+  }, values);
+}
+
+// Rasterize the grid to an equirectangular canvas (north at top). Used both for
+// the globe texture and for the 2D region-selection map.
+function buildAnomalyCanvas(grid){
+  const w = grid.width, h = grid.height;
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d');
   const img = ctx.createImageData(w, h);
-  // JSON lat[] ascends south -> north; canvas row 0 must be the north pole
-  // (matches the sphere's UV/position convention), so rows are flipped here.
-  for(let i=0;i<h;i++){
-    const canvasRow = h - 1 - i;
-    const row = grid[i];
-    for(let j=0;j<w;j++){
-      const v = row[j];
-      let r,g,b;
-      if(v === null || v === undefined){ r=124; g=122; b=112; }
-      else { [r,g,b] = anomalyRGB(v); }
-      const idx = (canvasRow*w + j) * 4;
-      img.data[idx]=r; img.data[idx+1]=g; img.data[idx+2]=b; img.data[idx+3]=255;
-    }
+  // grid row 0 is already north, matching both the canvas and the sphere's UV
+  // convention, so unlike the old JSON path there is no flip here.
+  for(let i=0, n=w*h; i<n; i++){
+    const v = grid.values[i];
+    let r,g,b;
+    if(Number.isNaN(v)){ r=124; g=122; b=112; }
+    else { const c = anomalyRGB(v); r=c[0]; g=c[1]; b=c[2]; }
+    const idx = i * 4;
+    img.data[idx]=r; img.data[idx+1]=g; img.data[idx+2]=b; img.data[idx+3]=255;
   }
   ctx.putImageData(img, 0, 0);
   return canvas;
 }
 
-function buildTextureFromData(data){
-  const tex = new THREE.CanvasTexture(buildAnomalyCanvas(data));
-  // Linear when minified (globe zoomed out) to avoid shimmer, but Nearest when
-  // magnified so the discrete bands stay crisp instead of blending at cell edges.
-  tex.minFilter = THREE.LinearFilter;
+function buildTextureFromGrid(grid){
+  const tex = new THREE.CanvasTexture(buildAnomalyCanvas(grid));
+  // Nearest when magnified so the discrete bands stay crisp at cell edges.
   tex.magFilter = THREE.NearestFilter;
+  // At 0.25 deg the texture is 1440x720, so a zoomed-out globe packs several
+  // texels into every screen pixel and shimmers badly without mipmaps. WebGL2
+  // mipmaps non-power-of-two textures happily; WebGL1 does not, so fall back to
+  // plain linear minification there.
+  if(renderer && renderer.capabilities.isWebGL2){
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+  } else {
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+  }
   return tex;
 }
 
@@ -282,14 +371,14 @@ function segmentsFor(country, r){
 }
 
 // ================= region average (flattened 2D box selection) =================
-let currentData = null;         // last-loaded anomaly JSON, for the region tool
+let currentGrid = null;         // last-loaded anomaly grid, for the region tool
 let regionSrc = null;           // cached equirectangular raster (rebuilt only on data change)
 let regionBox = null;           // LineSegments outline of the selection on the globe
 let regionSel = null;           // {latMin,latMax,lonMin,lonMax} or null
 const REGION_W = 480, REGION_H = 240;
 
 // Rebuild the cached raster; called on open / data change, NOT on every drag frame.
-function rebuildRegionSrc(){ regionSrc = currentData ? buildAnomalyCanvas(currentData) : null; }
+function rebuildRegionSrc(){ regionSrc = currentGrid ? buildAnomalyCanvas(currentGrid) : null; }
 
 function renderRegionMap(){
   const cv = document.getElementById('regionMap');
@@ -318,18 +407,20 @@ function mapPxToLonLat(px, py){
   return [ (px / REGION_W) * 360 - 180, 90 - (py / REGION_H) * 180 ];
 }
 
-// cos(lat)-area-weighted mean of the anomaly over a lat/lon box
+// cos(lat)-area-weighted mean of the anomaly over a lat/lon box.
+// Indexes straight to the rows and columns the box covers rather than scanning
+// the whole grid -- at 0.25 deg that is a million cells per drag frame otherwise.
 function averageRegion(sel){
-  const lat = currentData.lat, lon = currentData.lon, grid = currentData.anomaly_c;
+  const g = currentGrid;
+  const r0 = Math.max(0, g.rowFor(sel.latMax)), r1 = Math.min(g.height-1, g.rowFor(sel.latMin));
+  const c0 = Math.max(0, g.colFor(sel.lonMin)), c1 = Math.min(g.width-1, g.colFor(sel.lonMax));
   let wsum = 0, vsum = 0, count = 0, vmin = Infinity, vmax = -Infinity;
-  for(let i=0;i<lat.length;i++){
-    if(lat[i] < sel.latMin || lat[i] > sel.latMax) continue;
-    const wLat = Math.cos(lat[i] * Math.PI / 180);
-    const row = grid[i];
-    for(let j=0;j<lon.length;j++){
-      if(lon[j] < sel.lonMin || lon[j] > sel.lonMax) continue;
-      const v = row[j];
-      if(v === null || v === undefined) continue;
+  for(let r=r0; r<=r1; r++){
+    const wLat = Math.cos(g.latAt(r) * Math.PI / 180);
+    const base = r * g.width;
+    for(let c=c0; c<=c1; c++){
+      const v = g.values[base + c];
+      if(Number.isNaN(v)) continue;
       vsum += v * wLat; wsum += wLat; count++;
       if(v < vmin) vmin = v; if(v > vmax) vmax = v;
     }
@@ -623,51 +714,84 @@ function initGlobe(){
   animate();
 }
 
-// Shared by both the automatic fetch and the manual file picker: validate the
-// parsed JSON, build the globe texture, and update the status UI. Returns true
-// on success so callers can decide whether to keep the fallback uploader up.
-function applyData(data, updatedLabel){
-  if(!data.lat || !data.lon || !data.anomaly_c){
-    document.getElementById('dataSource').textContent = 'data is missing expected fields (lat/lon/anomaly_c)';
-    return false;
-  }
-  currentData = data;
-  globeMesh.material.map = buildTextureFromData(data);
+// Shared by both the automatic fetch and the manual file picker: adopt a grid,
+// build the globe texture, and update the status UI.
+function applyGrid(grid, updatedLabel){
+  currentGrid = grid;
+  globeMesh.material.map = buildTextureFromGrid(grid);
   globeMesh.material.needsUpdate = true;
-  document.getElementById('dataSource').textContent = `${data.date || 'unknown date'} — ${data.source || 'source unspecified'}`;
+  document.getElementById('dataSource').textContent =
+    `${grid.date || 'unknown date'} — ${grid.source || 'source unspecified'}`;
   document.getElementById('lastUpdated').textContent = updatedLabel;
   document.getElementById('uploader').classList.add('hidden');
   if(!document.getElementById('regionPanel').classList.contains('hidden')){ rebuildRegionSrc(); renderRegionMap(); }
   return true;
 }
 
-// On page load, try to fetch the committed data sitting next to this page. On
-// GitHub Pages this is the daily-refreshed file; opened locally (file://) or
-// before the first workflow run the fetch fails, and we fall back to the
-// manual uploader overlay (which stays visible).
-function autoLoadData(){
-  fetch('./sst_anomaly.json', {cache: 'no-store'})
-    .then(resp => { if(!resp.ok) throw new Error('HTTP ' + resp.status); return resp.json(); })
-    .then(data => { applyData(data, 'Updated ' + (data.date || 'unknown date')); })
-    .catch(() => {
-      document.getElementById('dataSource').textContent = 'no live data found — load a file below';
+function setStatus(msg){ document.getElementById('dataSource').textContent = msg; }
+
+// Fetch the sidecar first (it describes the grid and carries the decode table),
+// then the PNG it names.
+function fetchGrid(metaUrl){
+  return fetch(metaUrl, {cache: 'no-store'})
+    .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(meta => {
+      if(!meta.grid || !meta.encoding || !meta.encoding.lut){
+        throw new Error('sidecar is missing grid/encoding fields');
+      }
+      const pngUrl = new URL(meta.encoding.file || 'sst_anomaly.png', new URL(metaUrl, location.href));
+      return fetch(pngUrl, {cache: 'no-store'})
+        .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + meta.encoding.file); return r.blob(); })
+        .then(decodeBlob)
+        .then(img => decodeAnomalyImage(img, meta));
     });
 }
 
+// On page load, try to fetch the committed data sitting next to this page. On
+// GitHub Pages this is the daily-refreshed pair; opened locally (file://) or
+// before the first workflow run the fetch fails, and we fall back to the
+// manual uploader overlay (which stays visible). A pre-PNG sst_anomaly.json is
+// still honoured if that is all that is there.
+function autoLoadData(){
+  fetchGrid('./sst_anomaly.meta.json')
+    .then(grid => applyGrid(grid, 'Updated ' + (grid.date || 'unknown date')))
+    .catch(() => fetch('./sst_anomaly.json', {cache: 'no-store'})
+      .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(data => applyGrid(gridFromLegacyJSON(data), 'Updated ' + (data.date || 'unknown date'))))
+    .catch(() => setStatus('no live data found — load a file below'));
+}
+
+// Manual load. Accepts the PNG and its sidecar together, a lone sidecar (the
+// PNG it names is fetched alongside), or a pre-PNG single-file JSON.
 function onFileChosen(e){
-  const file = e.target.files[0];
-  if(!file) return;
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    let data;
-    try{ data = JSON.parse(ev.target.result); }
-    catch(err){
-      document.getElementById('dataSource').textContent = 'could not parse file: ' + err.message;
-      return;
-    }
-    applyData(data, 'Loaded ' + new Date().toLocaleTimeString());
-  };
-  reader.readAsText(file);
+  const files = Array.from(e.target.files || []);
+  if(!files.length) return;
+  const png = files.find(f => /\.png$/i.test(f.name));
+  const json = files.find(f => /\.json$/i.test(f.name));
+  const stamp = () => 'Loaded ' + new Date().toLocaleTimeString();
+
+  const readJSON = f => f.text().then(JSON.parse);
+
+  if(png && json){
+    Promise.all([readJSON(json), decodeBlob(png)])
+      .then(([meta, img]) => {
+        if(!meta.grid || !meta.encoding) throw new Error('that JSON is not a .meta.json sidecar');
+        applyGrid(decodeAnomalyImage(img, meta), stamp());
+      })
+      .catch(err => setStatus('could not load those files: ' + err.message));
+    return;
+  }
+  if(json){
+    readJSON(json)
+      .then(data => {
+        if(data.anomaly_c) return applyGrid(gridFromLegacyJSON(data), stamp());
+        if(data.grid && data.encoding) return fetchGrid('./sst_anomaly.meta.json').then(g => applyGrid(g, stamp()));
+        throw new Error('unrecognised JSON — expected anomaly_c or a grid/encoding sidecar');
+      })
+      .catch(err => setStatus('could not load that file: ' + err.message));
+    return;
+  }
+  setStatus('select sst_anomaly.png together with sst_anomaly.meta.json');
 }
 
 let moved=0;

@@ -1,3 +1,7 @@
 # Normalize line endings to LF in the repo (the workflow's shell script runs on
 # a Linux runner). Working-copy checkout on Windows can still be CRLF.
 * text=auto eol=lf
+
+# The daily anomaly raster is binary data, never text; be explicit so no
+# end-of-line conversion is ever attempted on it.
+*.png binary
