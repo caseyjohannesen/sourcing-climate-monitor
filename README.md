@@ -38,6 +38,41 @@ colour bands are 0.2–1.0 °C wide, so the error sits well below anything the m
 can show. `--format json` still emits the original single-file shape for local
 inspection.
 
+### Playback and the Niño 3.4 trend
+
+A timeline under the map scrubs through the last 180 days; the sparkline in the
+ENSO strip shows the Niño 3.4 index over the same window, with a marker that
+tracks whatever day is on screen.
+
+Frames live in `archive/frames/<date>.png` at 0.5°, sharing one grid and LUT from
+`archive/index.json` rather than a sidecar each — 15.6 MB for 180 days against
+45 MB at native, which is the only reason playback is practical in a repo that
+also takes a data commit daily. Only the two small JSON files load up front;
+frames are fetched on demand, cached to a bounded 40, and each displayed texture
+disposes the one before it (180 undisposed would be ~180 MB of GPU memory).
+
+The rightmost position is *live*: that day's native 0.25° grid is already loaded,
+so it is shown rather than its downsampled copy. The bar says which you are
+looking at, so the softer archive frames don't read as a bug.
+
+**The series is computed at native resolution even though the frames are not.**
+For 2026-09-09 the native index is +2.8877 — exactly what the browser's
+`averageBox()` gives — where the 0.5° frame gives +2.8713. Scrubbing therefore
+shows the archived native value, so the figure beside the sparkline always
+matches the point the marker sits on.
+
+Smoothing is a **7-day trailing mean**. Measured over 186 real days, raw daily
+noise is 0.032 °C sd against a 2.9 °C seasonal swing — sub-pixel in a sparkline —
+while a 90-day mean lags by 0.50 °C during a fast-developing event, which
+understates risk. The window is counted in calendar days, not array positions, so
+a gap shortens it rather than silently reaching further back than it claims to.
+
+`backfill_archive.py` fills the window from history instead of waiting six months
+for it to accumulate (`Backfill frame archive` workflow, manual). Cross-checked
+against ERDDAP's independently-computed anomalies: correlation 0.9982 with a
+near-constant offset, which is what two climatology baselines over the same water
+should look like.
+
 ### The ENSO strip
 
 The header strip is live, from two sources, because the three readouts need
