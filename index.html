@@ -72,14 +72,14 @@
   .country-panel .cp-msg{color:var(--muted);font-size:12px;padding:6px 0;}
   .country-panel .cp-note{margin-top:10px;font-size:10px;color:var(--muted);line-height:1.4;}
 
-  .region-panel{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:496px;max-width:calc(100% - 40px);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,0.35);}
+  .region-panel{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:360px;max-width:calc(100% - 40px);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,0.35);}
   .region-panel.hidden{display:none;}
   .region-panel .rp-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
   .region-panel .rp-title{font-family:'Fraunces',serif;font-size:15px;color:var(--paper);}
   .region-panel .rp-close{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;}
   .region-panel .rp-close:hover{color:var(--gold);}
-  .region-panel .rp-map{display:block;width:480px;max-width:100%;height:auto;border-radius:4px;background:#0b2124;cursor:crosshair;touch-action:none;}
-  .region-panel .rp-hint{font-size:11px;color:var(--muted);margin:8px 0 6px;}
+  .region-panel .rp-hint{font-size:11px;color:var(--muted);margin:2px 0 10px;line-height:1.5;}
+  .region-panel .rp-actions{display:flex;gap:8px;}
   .region-panel .rp-stats{min-height:44px;}
   .region-panel .rp-stats .rp-mean{font-family:'Fraunces',serif;font-size:22px;color:var(--gold);}
   .region-panel .rp-stats .rp-mean-lbl{font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:var(--muted);}
@@ -100,7 +100,7 @@
       <div class="refresh">
         <span id="lastUpdated">—</span>
         <button id="projBtn">Flat map</button>
-        <button id="regionBtn">Region average</button>
+        <button id="regionBtn">Draw region</button>
         <button id="loadBtn">Load data files</button>
       </div>
     </div>
@@ -127,10 +127,14 @@
         <span class="rp-title">Region average · SST anomaly</span>
         <button class="rp-close" id="rpClose" aria-label="Close">×</button>
       </div>
-      <canvas class="rp-map" id="regionMap" width="480" height="240"></canvas>
-      <div class="rp-hint">Drag a box on the map to average the SST anomaly inside it.</div>
+      <div class="rp-hint">Right-click the map to drop pins. Edges follow great-circle arcs.
+        Right-click the first pin again to close the region. Backspace undoes a pin, Esc clears.</div>
       <div class="rp-stats" id="rpStats"></div>
-      <button class="rp-clear" id="rpClear">Clear selection</button>
+      <div class="rp-actions">
+        <button class="rp-clear" id="rpClose2">Close region</button>
+        <button class="rp-clear" id="rpUndo">Undo pin</button>
+        <button class="rp-clear" id="rpClear">Clear</button>
+      </div>
     </div>
     <div class="map-caption">Sea surface temperature anomaly · <span class="status" id="dataSource">no data loaded</span></div>
     <div class="legend">
@@ -491,11 +495,15 @@ function segmentsFor(country){
 // transition is a lerp and a resize is a cheap reprojection of one endpoint.
 const morphLines = [];
 
-function makeMorphLine(material, elev){
-  const obj = new THREE.LineSegments(new THREE.BufferGeometry(), material);
+// Anything with a `position` attribute can be morphed -- LineSegments for the
+// borders and polygon edges, Points for the polygon's pins.
+function makeMorphObject(obj, elev){
   obj.userData = { lonlat: null, elev, posA: null, posB: null };
   morphLines.push(obj);
   return obj;
+}
+function makeMorphLine(material, elev){
+  return makeMorphObject(new THREE.LineSegments(new THREE.BufferGeometry(), material), elev);
 }
 
 function setLineLonLat(obj, lonlat){
@@ -633,145 +641,320 @@ function stepMorph(){
   if(k >= 1) morphing = false;
 }
 
-// ================= region average (flattened 2D box selection) =================
+// ================= region average (pin-drawn spherical polygon) =================
+// Right-click drops pins on the surface; consecutive pins are joined by
+// great-circle arcs; closing the ring averages the SST anomaly inside it.
+//
+// Two things here are easy to get subtly wrong, and both are the reason this
+// isn't just planar polygon code:
+//
+//  1. An edge between two pins must follow the sphere's surface, not a straight
+//     line through its interior -- and not a straight lon/lat interpolation
+//     either. A great circle from (0E,60N) to (90E,60N) reaches 67.79N at its
+//     midpoint; a lon/lat lerp says 60N the whole way. That is a ~870 km error
+//     on one edge, and it changes which cells the polygon encloses.
+//  2. "Inside" is ambiguous on a sphere: any closed ring divides it into two
+//     regions, and which one you mean is decided by winding order. d3.geoArea
+//     on a clockwise ring cheerfully returns the area of the entire rest of the
+//     planet. The gnomonic framing below sidesteps this: inside is the side
+//     containing the polygon's own centroid, which is what someone drawing a
+//     sourcing region means.
 let currentGrid = null;         // last-loaded anomaly grid, for the region tool
-let regionSrc = null;           // cached equirectangular raster (rebuilt only on data change)
-let regionBox = null;           // LineSegments outline of the selection on the globe
-let regionSel = null;           // {latMin,latMax,lonMin,lonMax} or null
-const REGION_W = 480, REGION_H = 240;
 
-// Rebuild the cached raster; called on open / data change, NOT on every drag frame.
-function rebuildRegionSrc(){ regionSrc = currentGrid ? buildAnomalyCanvas(currentGrid) : null; }
+const EARTH_R_KM = 6371.0088;
+const CLOSE_PX = 14;            // click within this of the first pin to close the ring
+const MAX_RADIUS_DEG = 85;      // gnomonic blows up at 90 deg from the centre
 
-function renderRegionMap(){
-  const cv = document.getElementById('regionMap');
-  const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, REGION_W, REGION_H);
-  if(!regionSrc){
-    document.getElementById('rpStats').innerHTML = '<span class="rp-msg">No data loaded yet.</span>';
-    return;
-  }
-  ctx.imageSmoothingEnabled = false;                 // keep the discrete bands crisp
-  ctx.drawImage(regionSrc, 0, 0, REGION_W, REGION_H);
-  if(regionSel){
-    // draw the current selection rectangle back onto the map
-    const x0 = (regionSel.lonMin + 180) / 360 * REGION_W;
-    const x1 = (regionSel.lonMax + 180) / 360 * REGION_W;
-    const y0 = (90 - regionSel.latMax) / 180 * REGION_H;   // latMax is the top edge
-    const y1 = (90 - regionSel.latMin) / 180 * REGION_H;
-    ctx.strokeStyle = '#D9A441';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+let polyPins = [];              // [[lon,lat], ...] committed pins
+let polyClosed = false;
+let polyPinObj = null, polyEdgeObj = null, polyRubberObj = null;
+let polyResult = null;          // cached stats for the closed ring
+
+// ---- spherical geometry -------------------------------------------------
+function toUnit(lon, lat){
+  const p = lon * DEG, b = lat * DEG, cb = Math.cos(b);
+  return [cb * Math.cos(p), cb * Math.sin(p), Math.sin(b)];
+}
+function fromUnit(v){
+  return [Math.atan2(v[1], v[0]) / DEG, Math.asin(Math.max(-1, Math.min(1, v[2]))) / DEG];
+}
+
+// Densify one great-circle edge into lon/lat points, splitting at the
+// antimeridian so the flat map doesn't draw a streak across the whole world.
+// d3.geoInterpolate is the great-circle interpolant; the subdivision count
+// follows the arc length so short edges stay cheap.
+function greatCircleEdge(a, b, out){
+  const arcDeg = d3.geoDistance(a, b) / DEG;
+  const n = Math.max(2, Math.ceil(arcDeg / 1.5));
+  const interp = d3.geoInterpolate(a, b);
+  let prev = a;
+  for(let k = 1; k <= n; k++){
+    const cur = (k === n) ? b : interp(k / n);
+    if(Math.abs(cur[0] - prev[0]) < 180){
+      out.push(prev[0], prev[1], cur[0], cur[1]);
+    } else {
+      // crosses +/-180: cut the segment at the seam and emit both halves, so
+      // each stays on its own side of the map
+      const west = prev[0] < 0 ? prev : cur, east = prev[0] < 0 ? cur : prev;
+      const f = (-180 - west[0]) / ((east[0] - 360) - west[0]);
+      const seamLat = west[1] + (east[1] - west[1]) * f;
+      out.push(west[0], west[1], -180, seamLat, 180, seamLat, east[0], east[1]);
+    }
+    prev = cur;
   }
 }
 
-// convert a map pixel (0..REGION_W, 0..REGION_H) to lon/lat
-function mapPxToLonLat(px, py){
-  return [ (px / REGION_W) * 360 - 180, 90 - (py / REGION_H) * 180 ];
+// All edges of a ring, densified. `closed` adds the final edge back to pin 0.
+function ringEdges(pins, closed){
+  const out = [];
+  for(let i = 0; i + 1 < pins.length; i++) greatCircleEdge(pins[i], pins[i+1], out);
+  if(closed && pins.length > 2) greatCircleEdge(pins[pins.length-1], pins[0], out);
+  return out;
 }
 
-// cos(lat)-area-weighted mean of the anomaly over a lat/lon box.
-// Indexes straight to the rows and columns the box covers rather than scanning
-// the whole grid -- at 0.25 deg that is a million cells per drag frame otherwise.
-function averageRegion(sel){
+// A gnomonic frame centred on the ring's own centroid. Gnomonic projection maps
+// every great circle to a straight line exactly, so in this frame the spherical
+// polygon becomes an ordinary planar one and point-in-polygon is the familiar
+// crossing test -- exact, and fast enough to run over tens of thousands of cells.
+function sphericalPolygon(pins){
+  if(pins.length < 3) return { ok: false, reason: 'need at least three pins' };
+
+  // centroid direction = normalised sum of the vertex unit vectors
+  let cx = 0, cy = 0, cz = 0;
+  for(const [lon, lat] of pins){ const v = toUnit(lon, lat); cx += v[0]; cy += v[1]; cz += v[2]; }
+  const cl = Math.hypot(cx, cy, cz);
+  if(cl < 1e-9) return { ok: false, reason: 'pins cancel out — the region is degenerate' };
+  const c = [cx/cl, cy/cl, cz/cl];
+
+  // an orthonormal basis with c as the view axis
+  const up = Math.abs(c[2]) < 0.9 ? [0,0,1] : [1,0,0];
+  let e1 = [up[1]*c[2]-up[2]*c[1], up[2]*c[0]-up[0]*c[2], up[0]*c[1]-up[1]*c[0]];
+  const e1l = Math.hypot(e1[0], e1[1], e1[2]);
+  e1 = [e1[0]/e1l, e1[1]/e1l, e1[2]/e1l];
+  const e2 = [c[1]*e1[2]-c[2]*e1[1], c[2]*e1[0]-c[0]*e1[2], c[0]*e1[1]-c[1]*e1[0]];
+
+  const minDot = Math.cos(MAX_RADIUS_DEG * DEG);
+  const ring = [];
+  for(const [lon, lat] of pins){
+    const v = toUnit(lon, lat);
+    const d = v[0]*c[0] + v[1]*c[1] + v[2]*c[2];
+    if(d < minDot) return { ok: false, reason: 'region spans too much of the globe — draw it in smaller pieces' };
+    ring.push([ (v[0]*e1[0]+v[1]*e1[1]+v[2]*e1[2]) / d,
+                (v[0]*e2[0]+v[1]*e2[1]+v[2]*e2[2]) / d ]);
+  }
+
+  return {
+    ok: true,
+    contains(lon, lat){
+      const v = toUnit(lon, lat);
+      const d = v[0]*c[0] + v[1]*c[1] + v[2]*c[2];
+      if(d < 1e-9) return false;                 // more than 90 deg away: cannot be inside
+      const x = (v[0]*e1[0]+v[1]*e1[1]+v[2]*e1[2]) / d;
+      const y = (v[0]*e2[0]+v[1]*e2[1]+v[2]*e2[2]) / d;
+      let inside = false;
+      for(let i = 0, j = ring.length - 1; i < ring.length; j = i++){
+        const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+        if(((yi > y) !== (yj > y)) && (x < (xj-xi)*(y-yi)/(yj-yi) + xi)) inside = !inside;
+      }
+      return inside;
+    },
+  };
+}
+
+// True spherical area. d3.geoArea returns the region to the LEFT of the ring, so
+// a clockwise ring gives the complement; the hemisphere limit above guarantees
+// the region we mean is the smaller of the two, which makes this unambiguous.
+function polygonAreaKm2(pins){
+  const ring = pins.map(p => [p[0], p[1]]);
+  ring.push([pins[0][0], pins[0][1]]);
+  const sr = d3.geoArea({ type: 'Polygon', coordinates: [ring] });
+  return Math.min(sr, 4*Math.PI - sr) * EARTH_R_KM * EARTH_R_KM;
+}
+
+// Bounds from the densified arc, never from the pins: a great circle bulges
+// poleward of both its endpoints, so vertex bounds would clip the region.
+// Returns null lon bounds when the ring wraps the antimeridian, in which case
+// every column has to be scanned.
+function densifiedBounds(edges){
+  let latMin = 90, latMax = -90, lonMin = 180, lonMax = -180, wraps = false;
+  for(let i = 0; i < edges.length; i += 2){
+    const lon = edges[i], lat = edges[i+1];
+    if(lat < latMin) latMin = lat;
+    if(lat > latMax) latMax = lat;
+    if(lon < lonMin) lonMin = lon;
+    if(lon > lonMax) lonMax = lon;
+  }
+  // A ring that straddles the seam shows up as a full-width span; the seam
+  // split above puts points at both -180 and +180.
+  if(lonMax - lonMin > 180) wraps = true;
+  return { latMin, latMax, lonMin, lonMax, wraps };
+}
+
+// cos(lat)-area-weighted mean of the anomaly inside the ring
+function averagePolygon(pins, edges){
+  const poly = sphericalPolygon(pins);
+  if(!poly.ok) return { error: poly.reason };
   const g = currentGrid;
-  const r0 = Math.max(0, g.rowFor(sel.latMax)), r1 = Math.min(g.height-1, g.rowFor(sel.latMin));
-  const c0 = Math.max(0, g.colFor(sel.lonMin)), c1 = Math.min(g.width-1, g.colFor(sel.lonMax));
-  let wsum = 0, vsum = 0, count = 0, vmin = Infinity, vmax = -Infinity;
-  for(let r=r0; r<=r1; r++){
-    const wLat = Math.cos(g.latAt(r) * Math.PI / 180);
-    const base = r * g.width;
-    for(let c=c0; c<=c1; c++){
+  if(!g) return { error: 'no data loaded' };
+
+  const b = densifiedBounds(edges);
+  const r0 = Math.max(0, g.rowFor(b.latMax)), r1 = Math.min(g.height-1, g.rowFor(b.latMin));
+  const c0 = b.wraps ? 0 : Math.max(0, g.colFor(b.lonMin));
+  const c1 = b.wraps ? g.width-1 : Math.min(g.width-1, g.colFor(b.lonMax));
+
+  let wsum = 0, vsum = 0, count = 0, tested = 0, vmin = Infinity, vmax = -Infinity;
+  for(let r = r0; r <= r1; r++){
+    const lat = g.latAt(r), wLat = Math.cos(lat * DEG), base = r * g.width;
+    for(let c = c0; c <= c1; c++){
+      tested++;
+      if(!poly.contains(g.lonAt(c), lat)) continue;
       const v = g.values[base + c];
-      if(Number.isNaN(v)) continue;
+      if(Number.isNaN(v)) continue;              // land / no data
       vsum += v * wLat; wsum += wLat; count++;
       if(v < vmin) vmin = v; if(v > vmax) vmax = v;
     }
   }
-  return count ? { mean: vsum / wsum, min: vmin, max: vmax, count } : { count: 0 };
+  return count
+    ? { mean: vsum/wsum, min: vmin, max: vmax, count, tested, areaKm2: polygonAreaKm2(pins) }
+    : { count: 0, tested, areaKm2: polygonAreaKm2(pins) };
 }
 
+// ---- rendering ----------------------------------------------------------
+function ensurePolyObjects(){
+  if(polyEdgeObj) return;
+  polyEdgeObj = makeMorphLine(new THREE.LineBasicMaterial({color:0xD9A441}), ELEV_REGION);
+  world.add(polyEdgeObj);
+  polyRubberObj = makeMorphLine(
+    new THREE.LineBasicMaterial({color:0xD9A441, transparent:true, opacity:0.45}), ELEV_REGION);
+  world.add(polyRubberObj);
+  polyPinObj = makeMorphObject(
+    new THREE.Points(new THREE.BufferGeometry(),
+      new THREE.PointsMaterial({color:0xEDEAE1, size:7, sizeAttenuation:false})),
+    ELEV_REGION);
+  world.add(polyPinObj);
+}
+
+function redrawPolygon(){
+  ensurePolyObjects();
+  const edges = ringEdges(polyPins, polyClosed);
+  if(edges.length){ setLineLonLat(polyEdgeObj, edges); }
+  polyEdgeObj.visible = edges.length > 0;
+
+  if(polyPins.length){
+    const pts = [];
+    for(const [lon, lat] of polyPins) pts.push(lon, lat);
+    setLineLonLat(polyPinObj, pts);
+  }
+  polyPinObj.visible = polyPins.length > 0;
+  if(polyClosed) polyRubberObj.visible = false;
+}
+
+// the edge that trails the cursor while the ring is still open
+function updateRubber(lon, lat){
+  ensurePolyObjects();
+  if(polyClosed || !polyPins.length || lon == null){ polyRubberObj.visible = false; return; }
+  const out = [];
+  greatCircleEdge(polyPins[polyPins.length-1], [lon, lat], out);
+  setLineLonLat(polyRubberObj, out);
+  polyRubberObj.visible = true;
+}
+
+// ---- interaction --------------------------------------------------------
+// Note on where a pin "is": unproject() resolves a click against the sphere at
+// GLOBE_R, i.e. the visible textured surface, so the stored lon/lat is the
+// feature the user actually clicked on. The marker is then drawn ELEV_REGION
+// above that, to keep it clear of the surface and the borders, which makes it
+// render up to ~2.5 px outward of the cursor near the limb (nothing at the
+// centre). Matching the marker to the cursor instead would mean storing a
+// coordinate up to 2.5 deg away from the thing under it, which is the worse
+// trade for a tool whose output is a region average. screenDistanceTo below
+// therefore measures against the drawn position, so clicking a pin you can see
+// is what closes the ring.
+function screenDistanceTo(lonlat, clientX, clientY){
+  const out = [0,0,0];
+  (projMode === 'flat' ? projectFlat : projectGlobe)(lonlat[0], lonlat[1], ELEV_REGION, out, 0);
+  world.updateMatrixWorld();
+  const p = new THREE.Vector3(out[0], out[1], out[2]).applyMatrix4(world.matrixWorld).project(camera);
+  const rect = renderer.domElement.getBoundingClientRect();
+  const sx = rect.left + (p.x + 1) / 2 * rect.width;
+  const sy = rect.top + (1 - p.y) / 2 * rect.height;
+  return Math.hypot(sx - clientX, sy - clientY);
+}
+
+function onContextMenu(e){
+  e.preventDefault();                             // no browser menu over the map
+  const ll = unproject(e.clientX, e.clientY);
+  if(!ll) return;
+  if(polyClosed){ clearPolygon(); }
+  // right-clicking back on the first pin closes the ring
+  if(polyPins.length > 2 && screenDistanceTo(polyPins[0], e.clientX, e.clientY) < CLOSE_PX){
+    closePolygon();
+    return;
+  }
+  polyPins.push(ll);
+  redrawPolygon();
+  updatePolygonStats();
+}
+
+function closePolygon(){
+  if(polyPins.length < 3){ updatePolygonStats(); return; }
+  polyClosed = true;
+  polyResult = averagePolygon(polyPins, ringEdges(polyPins, true));
+  redrawPolygon();
+  updatePolygonStats();
+}
+
+function undoPin(){
+  if(polyClosed){ polyClosed = false; polyResult = null; }
+  polyPins.pop();
+  redrawPolygon();
+  updatePolygonStats();
+}
+
+function clearPolygon(){
+  polyPins = [];
+  polyClosed = false;
+  polyResult = null;
+  redrawPolygon();
+  if(polyRubberObj) polyRubberObj.visible = false;
+  updatePolygonStats();
+}
+
+// ---- readout ------------------------------------------------------------
 function fmtLon(v){ return Math.abs(v).toFixed(1) + (v < 0 ? '°W' : '°E'); }
 function fmtLat(v){ return Math.abs(v).toFixed(1) + (v < 0 ? '°S' : '°N'); }
 function signed(v){ return (v >= 0 ? '+' : '') + v.toFixed(2); }
+function fmtArea(km2){
+  return km2 >= 1e6 ? (km2/1e6).toFixed(2) + ' M km²' : Math.round(km2).toLocaleString() + ' km²';
+}
 
-function updateRegionStats(){
+function updatePolygonStats(){
   const el = document.getElementById('rpStats');
-  if(!regionSel){ el.innerHTML = '<span class="rp-msg">Drag a box on the map above.</span>'; return; }
-  const s = regionSel, r = averageRegion(s);
-  const bounds = `${fmtLon(s.lonMin)}–${fmtLon(s.lonMax)}, ${fmtLat(s.latMin)}–${fmtLat(s.latMax)}`;
-  if(!r.count){ el.innerHTML = `<span class="rp-msg">No ocean cells in ${bounds} (all land / no data).</span>`; return; }
+  const n = polyPins.length;
+  if(!polyClosed){
+    el.innerHTML = '<span class="rp-msg">' + (
+      n === 0 ? 'Right-click on the map to drop the first pin.' :
+      n < 3   ? `${n} pin${n>1?'s':''} — at least three are needed.` :
+                `${n} pins — right-click the first pin again, or press Close region.`
+    ) + '</span>';
+    return;
+  }
+  const r = polyResult || {};
+  if(r.error){ el.innerHTML = `<span class="rp-msg">${r.error}</span>`; return; }
+  if(!r.count){
+    el.innerHTML = `<span class="rp-msg">No ocean cells inside this region (all land / no data) — `
+                 + `${fmtArea(r.areaKm2)}.</span>`;
+    return;
+  }
   el.innerHTML =
     `<div class="rp-mean">${signed(r.mean)} °C<span class="rp-mean-lbl"> mean anomaly</span></div>` +
-    `<div class="rp-sub">min ${signed(r.min)} · max ${signed(r.max)} · ${r.count} cells (area-weighted)</div>` +
-    `<div class="rp-sub">${bounds}</div>`;
+    `<div class="rp-sub">min ${signed(r.min)} · max ${signed(r.max)} · ${r.count.toLocaleString()} ocean cells (area-weighted)</div>` +
+    `<div class="rp-sub">${n} pins · ${fmtArea(r.areaKm2)} enclosed</div>`;
 }
-
-// subdivide one edge (a->b, each [lon,lat]) into short lon/lat segments that
-// follow the surface. Unlike appendRing there's no antimeridian guard: box edges
-// follow constant lat/lon and never wrap, so a box wider than 180 deg must still
-// draw fully.
-function pushEdge(out, a, b){
-  const dl = b[0]-a[0], db = b[1]-a[1];
-  const n = Math.max(1, Math.ceil(Math.max(Math.abs(dl), Math.abs(db)) / 2));
-  let pLon = a[0], pLat = a[1];
-  for(let k=1;k<=n;k++){
-    const t = k/n;
-    const qLon = a[0]+dl*t, qLat = a[1]+db*t;
-    out.push(pLon, pLat, qLon, qLat);
-    pLon = qLon; pLat = qLat;
-  }
-}
-
-// outline the selected box on the surface, in lon/lat -- so it lands correctly
-// in whichever projection is showing.
-function updateRegionBox(){
-  if(!regionBox){
-    regionBox = makeMorphLine(new THREE.LineBasicMaterial({color:0xD9A441}), ELEV_REGION);
-    world.add(regionBox);
-  }
-  if(regionSel){
-    const s = regionSel, out = [];
-    pushEdge(out, [s.lonMin,s.latMin], [s.lonMax,s.latMin]);
-    pushEdge(out, [s.lonMax,s.latMin], [s.lonMax,s.latMax]);
-    pushEdge(out, [s.lonMax,s.latMax], [s.lonMin,s.latMax]);
-    pushEdge(out, [s.lonMin,s.latMax], [s.lonMin,s.latMin]);
-    setLineLonLat(regionBox, out);
-  }
-  regionBox.visible = !!regionSel;
-}
-
-function setRegionSelection(sel){
-  regionSel = sel;
-  renderRegionMap();
-  updateRegionStats();
-  updateRegionBox();
-}
-
-// drag-to-draw on the 2D map
-let regionDragging = false, regionStart = null;
-function regionMapXY(e){
-  const rect = document.getElementById('regionMap').getBoundingClientRect();
-  return [ Math.max(0, Math.min(REGION_W, (e.clientX-rect.left) / rect.width * REGION_W)),
-           Math.max(0, Math.min(REGION_H, (e.clientY-rect.top) / rect.height * REGION_H)) ];
-}
-function onRegionDown(e){ regionDragging = true; regionStart = regionMapXY(e); e.preventDefault(); }
-function onRegionMove(e){
-  if(!regionDragging) return;
-  const [x1,y1] = regionMapXY(e), [x0,y0] = regionStart;
-  const [lonA,latA] = mapPxToLonLat(x0, y0), [lonB,latB] = mapPxToLonLat(x1, y1);
-  setRegionSelection({
-    lonMin: Math.min(lonA,lonB), lonMax: Math.max(lonA,lonB),
-    latMin: Math.min(latA,latB), latMax: Math.max(latA,latB),
-  });
-}
-function onRegionUp(){ regionDragging = false; }
 
 function openRegionPanel(){
   document.getElementById('regionPanel').classList.remove('hidden');
-  rebuildRegionSrc();
-  renderRegionMap();
-  updateRegionStats();
+  updatePolygonStats();
 }
 function closeRegionPanel(){
   document.getElementById('regionPanel').classList.add('hidden');
@@ -962,11 +1145,15 @@ function initScene(){
     panel.classList.contains('hidden') ? openRegionPanel() : closeRegionPanel();
   });
   document.getElementById('rpClose').addEventListener('click', closeRegionPanel);
-  document.getElementById('rpClear').addEventListener('click', () => setRegionSelection(null));
-  const rmap = document.getElementById('regionMap');
-  rmap.addEventListener('pointerdown', onRegionDown);
-  window.addEventListener('pointermove', onRegionMove);
-  window.addEventListener('pointerup', onRegionUp);
+  document.getElementById('rpClose2').addEventListener('click', closePolygon);
+  document.getElementById('rpUndo').addEventListener('click', undoPin);
+  document.getElementById('rpClear').addEventListener('click', clearPolygon);
+  canvas.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('keydown', (e) => {
+    if(e.key === 'Escape') clearPolygon();
+    else if(e.key === 'Backspace' && polyPins.length){ e.preventDefault(); undoPin(); }
+    else if(e.key === 'Enter' && !polyClosed && polyPins.length > 2) closePolygon();
+  });
 
   animate();
 }
@@ -981,7 +1168,9 @@ function applyGrid(grid, updatedLabel){
     `${grid.date || 'unknown date'} — ${grid.source || 'source unspecified'}`;
   document.getElementById('lastUpdated').textContent = updatedLabel;
   document.getElementById('uploader').classList.add('hidden');
-  if(!document.getElementById('regionPanel').classList.contains('hidden')){ rebuildRegionSrc(); renderRegionMap(); }
+  // a closed region's stats were computed against the previous grid; recompute
+  if(polyClosed){ polyResult = averagePolygon(polyPins, ringEdges(polyPins, true)); }
+  if(!document.getElementById('regionPanel').classList.contains('hidden')) updatePolygonStats();
   return true;
 }
 
@@ -1071,8 +1260,11 @@ function onPointerMove(e){
     lastX = e.clientX; lastY = e.clientY;
     return;
   }
-  // not dragging: highlight the country under the cursor
-  setHoveredCountry(pickCountryAt(e.clientX, e.clientY), e.clientX, e.clientY);
+  // not dragging: highlight the country under the cursor, and trail the
+  // in-progress polygon edge behind it
+  const ll = unproject(e.clientX, e.clientY);
+  setHoveredCountry(ll && countries ? countryAt(ll[0], ll[1]) : null, e.clientX, e.clientY);
+  if(polyPins.length && !polyClosed) updateRubber(ll ? ll[0] : null, ll ? ll[1] : null);
 }
 function onPointerUp(e){
   const wasDragging = dragging;

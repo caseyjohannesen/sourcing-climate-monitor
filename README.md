@@ -38,6 +38,33 @@ colour bands are 0.2–1.0 °C wide, so the error sits well below anything the m
 can show. `--format json` still emits the original single-file shape for local
 inspection.
 
+### Region selection
+
+Right-click the map to drop pins; right-click the first pin again (or press
+**Close region**) to close the ring and get the area-weighted mean SST anomaly
+inside it. Backspace undoes a pin, Esc clears. It works identically on the globe
+and the flat map, and a region drawn in one view is still there in the other.
+
+Two details make this spherical rather than planar geometry:
+
+- **Edges are great-circle arcs**, via `d3.geoInterpolate`. A great circle from
+  (0°E, 60°N) to (90°E, 60°N) reaches **67.79°N** at its midpoint — a straight
+  lon/lat interpolation says 60°N the whole way, an ~870 km error on one edge.
+  The region's bounding box is therefore taken from the densified arc, never
+  from the pins, or the scan would clip the bulge.
+- **Point-in-polygon is done in a gnomonic frame** centred on the ring's own
+  centroid. Gnomonic maps every great circle to a straight line *exactly*, so
+  the spherical polygon becomes a planar one and the ordinary crossing test is
+  correct — at ~50 ns per cell rather than the ~10 µs `d3.geoContains` costs,
+  which matters when scanning tens of thousands of cells. It also settles the
+  "which side is inside?" ambiguity the right way: inside is the side containing
+  the centroid. (`d3.geoArea` on a clockwise ring returns the area of the entire
+  rest of the planet — winding order is load-bearing, and this avoids depending
+  on it.) The implementation is checked against `d3.geoContains` as an oracle.
+
+Gnomonic diverges at 90° from its centre, so a ring spanning more than ~85°
+from its own centroid is refused with a message rather than answered wrongly.
+
 ### The projection seam
 
 Both views are the *same* scene. All geometry — country borders, the hover
