@@ -114,10 +114,10 @@
       </div>
     </div>
     <div class="enso-strip">
-      <div class="enso-metric"><span class="label">Niño 3.4 SST anomaly</span><span class="val">+1.4°C</span></div>
-      <div class="enso-metric"><span class="label">Phase</span><span class="val phase">El Niño — Strong</span></div>
-      <div class="enso-metric"><span class="label">3-month trend</span><span class="val">Weakening</span></div>
-      <div class="enso-note">Placeholder values — wire this strip to your existing NOAA CPC monitoring flow for a live feed.</div>
+      <div class="enso-metric"><span class="label">Niño 3.4 SST anomaly (daily)</span><span class="val" id="ensoVal">—</span></div>
+      <div class="enso-metric"><span class="label">Phase</span><span class="val phase" id="ensoPhase">—</span></div>
+      <div class="enso-metric"><span class="label">3-month trend</span><span class="val" id="ensoTrend">—</span></div>
+      <div class="enso-note" id="ensoNote">Loading…</div>
     </div>
   </header>
 
@@ -1083,6 +1083,66 @@ function setHoveredCountry(c, clientX, clientY, ll){
   }
 }
 
+// ================= ENSO strip =================
+// Two sources, because the three readouts want different things.
+//
+// The anomaly is computed straight from the grid already on screen: it is a day
+// fresh rather than a month, it is consistent with what the map is showing, and
+// it costs nothing. Checked against CPC's own weekly Nino 3.4 figure for the
+// same week, the two agree to about 0.02 C.
+//
+// Phase and trend cannot come from one day -- they are declared from the ONI, a
+// 3-month running mean -- and CPC serves no CORS headers, so the page cannot
+// fetch it. extract_sst_anomaly.py pulls it and leaves it in the sidecar.
+const NINO34 = { latMin: -5, latMax: 5, lonMin: -170, lonMax: -120 };
+
+// Nino 3.4 is a lat/lon box, not a ring of great-circle arcs, so it wants a
+// plain box mean rather than the region tool's spherical polygon machinery.
+function averageBox(g, b){
+  const r0 = Math.max(0, g.rowFor(b.latMax)), r1 = Math.min(g.height-1, g.rowFor(b.latMin));
+  const c0 = Math.max(0, g.colFor(b.lonMin)), c1 = Math.min(g.width-1, g.colFor(b.lonMax));
+  let wsum = 0, vsum = 0, count = 0;
+  for(let r = r0; r <= r1; r++){
+    const w = Math.cos(g.latAt(r) * DEG), base = r * g.width;
+    for(let c = c0; c <= c1; c++){
+      const v = g.values[base + c];
+      if(Number.isNaN(v)) continue;
+      vsum += v * w; wsum += w; count++;
+    }
+  }
+  return count ? { mean: vsum / wsum, count } : null;
+}
+
+function updateEnsoStrip(grid){
+  const val = document.getElementById('ensoVal');
+  const phase = document.getElementById('ensoPhase');
+  const trend = document.getElementById('ensoTrend');
+  const note = document.getElementById('ensoNote');
+  if(!val) return;
+
+  const n34 = grid ? averageBox(grid, NINO34) : null;
+  val.textContent = n34 ? signed(n34.mean) + ' °C' : '—';
+
+  const e = grid && grid.meta && grid.meta.enso;
+  if(e){
+    phase.textContent = e.phase + (e.strength ? ' — ' + e.strength : '');
+    trend.textContent = e.trend + (e.trend !== 'Neutral' && e.delta_3season != null
+      ? ` (${signed(e.delta_3season)} over 3 seasons)` : '');
+  } else {
+    phase.textContent = '—';
+    trend.textContent = '—';
+  }
+
+  const parts = [];
+  if(n34) parts.push(`Anomaly: area-weighted mean of the Niño 3.4 box (5°S–5°N, 170–120°W), `
+                   + `${n34.count.toLocaleString()} cells of the grid above${grid.date ? ', ' + grid.date : ''}.`);
+  parts.push(e
+    ? `Phase and trend: NOAA CPC Oceanic Niño Index, ${e.season} = ${signed(e.oni)}.`
+    : `Phase and trend need NOAA CPC's Oceanic Niño Index, which wasn't available when this data was built.`);
+  note.textContent = parts.join(' ');
+}
+// ================= end ENSO strip =================
+
 // ---- click drill-down: area-averaged conditions from Open-Meteo -------------
 // Open-Meteo accepts many coordinates in one request and returns an array, and
 // it exposes soil moisture as a `current` variable, so one request per selection
@@ -1618,6 +1678,7 @@ function applyGrid(grid, updatedLabel){
     `${grid.date || 'unknown date'} — ${grid.source || 'source unspecified'}`;
   document.getElementById('lastUpdated').textContent = updatedLabel;
   document.getElementById('uploader').classList.add('hidden');
+  updateEnsoStrip(grid);
   // a closed region's stats were computed against the previous grid; recompute
   if(polyClosed){ polyResult = averagePolygon(polyPins, ringEdges(polyPins, true)); }
   if(!document.getElementById('regionPanel').classList.contains('hidden')) updatePolygonStats();
@@ -1654,7 +1715,10 @@ function autoLoadData(){
     .catch(() => fetch('./sst_anomaly.json', {cache: 'no-store'})
       .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(data => applyGrid(gridFromLegacyJSON(data), 'Updated ' + (data.date || 'unknown date'))))
-    .catch(() => setStatus('no live data found — load a file below'));
+    .catch(() => {
+      setStatus('no live data found — load a file below');
+      updateEnsoStrip(null);
+    });
 }
 
 // Manual load. Accepts the PNG and its sidecar together, a lone sidecar (the

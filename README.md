@@ -38,6 +38,28 @@ colour bands are 0.2–1.0 °C wide, so the error sits well below anything the m
 can show. `--format json` still emits the original single-file shape for local
 inspection.
 
+### The ENSO strip
+
+The header strip is live, from two sources, because the three readouts need
+different things.
+
+The **anomaly** is computed in the browser from the grid already on screen — an
+area-weighted mean of the Niño 3.4 box (5°S–5°N, 170–120°W). That costs nothing,
+is a day fresh rather than a month, and is consistent with what the map shows.
+Checked against NOAA CPC's own weekly Niño 3.4 figure for the same week, the two
+agree to **0.02 °C** (ours +2.578, CPC +2.6).
+
+**Phase** and **3-month trend** cannot come from a single day — they are declared
+from the Oceanic Niño Index, a 3-month running mean — and CPC serves no CORS
+headers, so the page cannot fetch it. `extract_sst_anomaly.py` pulls
+`oni.ascii.txt`, classifies it with CPC's conventional thresholds, and leaves the
+result in the sidecar. Trend is measured on |ONI| so a deepening La Niña reads as
+strengthening rather than falling.
+
+If CPC is unreachable the run still succeeds: the ENSO block is simply absent,
+the anomaly still shows, and phase and trend read "—" with the reason given
+rather than displaying something stale.
+
 ### Clicking a country
 
 Clicking a country flies the view to it — rotating and dollying the globe, or

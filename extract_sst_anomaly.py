@@ -300,6 +300,95 @@ def compute_anomaly(sst_ds, clim_ds, step_deg):
     return grid, lats, lons, target_date
 
 
+# ---------------------------------------------------------------------------
+# ENSO state
+# ---------------------------------------------------------------------------
+# The Oceanic Nino Index: a 3-month running mean of Nino 3.4 SST anomalies, and
+# the thing ENSO phase is actually declared from. It cannot be derived from a
+# single day's grid, and CPC serves no CORS headers, so the page cannot fetch it
+# either -- hence pulling it here and carrying it in the sidecar.
+#
+# The strip's *value* is not taken from here: the page computes Nino 3.4 straight
+# from the grid it already has, which is a day fresh rather than a month, and
+# agrees with CPC's own weekly figure to about 0.02 C. This supplies the phase
+# and trend, which need the running mean.
+ONI_URL = "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
+
+# Standard CPC strength bands, applied to |ONI|.
+ONI_BANDS = [(0.5, "Weak"), (1.0, "Moderate"), (1.5, "Strong"), (2.0, "Very strong")]
+
+
+def classify_oni(oni):
+    """(phase, strength) for an ONI value, using CPC's conventional thresholds."""
+    if abs(oni) < 0.5:
+        return "Neutral", ""
+    phase = "El Niño" if oni > 0 else "La Niña"
+    strength = "Weak"
+    for lo, name in ONI_BANDS:
+        if abs(oni) >= lo:
+            strength = name
+    return phase, strength
+
+
+def parse_oni(text, keep=6):
+    """Last `keep` seasons from CPC's oni.ascii.txt as [{season, oni}, ...]."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 4 or parts[0] == "SEAS":
+            continue
+        try:
+            rows.append({"season": f"{parts[0]} {parts[1]}", "oni": float(parts[3])})
+        except ValueError:
+            continue
+    return rows[-keep:]
+
+
+def build_enso(fetch=None):
+    """ENSO block for the sidecar, or None if CPC can't be reached.
+
+    Deliberately non-fatal: a missing ONI should cost the strip its phase
+    readout, not cost the whole run its SST grid.
+    """
+    try:
+        if fetch is None:
+            resp = requests.get(ONI_URL, timeout=30)
+            resp.raise_for_status()
+            text = resp.text
+        else:
+            text = fetch()
+        recent = parse_oni(text)
+        if len(recent) < 3:
+            return None
+        latest = recent[-1]
+        phase, strength = classify_oni(latest["oni"])
+        # Trend over the last three seasons, measured on |ONI| so that a
+        # deepening La Nina reads as strengthening rather than falling.
+        delta = abs(latest["oni"]) - abs(recent[-3]["oni"])
+        if phase == "Neutral":
+            trend = "Neutral"
+        elif delta > 0.2:
+            trend = "Strengthening"
+        elif delta < -0.2:
+            trend = "Weakening"
+        else:
+            trend = "Steady"
+        return {
+            "season": latest["season"],
+            "oni": round(latest["oni"], 2),
+            "phase": phase,
+            "strength": strength,
+            "trend": trend,
+            "delta_3season": round(delta, 2),
+            "recent": recent,
+            "source": "NOAA CPC Oceanic Nino Index (ERSSTv5, 3-month running mean)",
+        }
+    except Exception as e:
+        print(f"  WARNING: could not fetch the ONI ({e}); the strip will fall back "
+              f"to the grid-derived value alone.", file=sys.stderr)
+        return None
+
+
 def build_meta(grid, lats, lons, target_date, step_deg, clipped_low, clipped_high, png_name):
     valid = np.isfinite(grid)
     vals = grid[valid]
@@ -329,6 +418,10 @@ def build_meta(grid, lats, lons, target_date, step_deg, clipped_low, clipped_hig
             # without any JavaScript edit.
             "lut": build_lut(),
         },
+        # ENSO phase/trend, or absent if CPC was unreachable. No fetch timestamp
+        # here on purpose: the workflow diffs this file (minus generated_at) to
+        # decide whether to commit, and a timestamp would force a commit daily.
+        "enso": build_enso(),
         "stats": {
             "ocean_cells": int(valid.sum()),
             "min_c": round(float(vals.min()), 3),

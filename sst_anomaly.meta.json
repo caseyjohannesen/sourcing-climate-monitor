@@ -1,6 +1,6 @@
 {
  "date": "2026-08-26",
- "generated_at": "2026-09-11T14:12:31.274728+00:00",
+ "generated_at": "2026-09-11T15:28:02.600198+00:00",
  "source": "NOAA OISST v2 High-Res, anomaly vs 1991-2020 daily climatology",
  "resolution_deg": 0.25,
  "grid": {
@@ -275,6 +275,41 @@
    18.5,
    19.0
   ]
+ },
+ "enso": {
+  "season": "JJA 2026",
+  "oni": 1.8,
+  "phase": "El Ni\u00f1o",
+  "strength": "Strong",
+  "trend": "Strengthening",
+  "delta_3season": 0.85,
+  "recent": [
+   {
+    "season": "JFM 2026",
+    "oni": -0.21
+   },
+   {
+    "season": "FMA 2026",
+    "oni": 0.11
+   },
+   {
+    "season": "MAM 2026",
+    "oni": 0.46
+   },
+   {
+    "season": "AMJ 2026",
+    "oni": 0.95
+   },
+   {
+    "season": "MJJ 2026",
+    "oni": 1.39
+   },
+   {
+    "season": "JJA 2026",
+    "oni": 1.8
+   }
+  ],
+  "source": "NOAA CPC Oceanic Nino Index (ERSSTv5, 3-month running mean)"
  },
  "stats": {
   "ocean_cells": 691150,
