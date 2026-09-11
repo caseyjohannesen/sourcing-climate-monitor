@@ -10,3 +10,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Source dataset cached by prepare_admin1.py (~40 MB); the per-country split in
+# admin1/ is what gets committed, not this.
+.cache_ne_10m_admin_1.geojson

@@ -17,7 +17,11 @@ import urllib.request
 
 SRC = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson"
 OUT = "countries.geojson"
-KEEP = ["NAME", "ADMIN", "ISO_A3", "CONTINENT", "LABEL_X", "LABEL_Y"]
+# ADM0_A3 is the key used to look up a country's admin-1 file (see
+# prepare_admin1.py). It is kept alongside ISO_A3 rather than instead of it
+# because Natural Earth leaves ISO_A3 as "-99" for a handful of countries --
+# France, Norway, N. Cyprus, Somaliland and Kosovo -- while ADM0_A3 is always set.
+KEEP = ["NAME", "ADMIN", "ISO_A3", "ADM0_A3", "CONTINENT", "LABEL_X", "LABEL_Y"]
 
 
 def _round_ring(ring):
