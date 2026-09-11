@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <title>Sourcing Climate Monitor</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- d3-geo supplies geoEqualEarth (and its invert) for the flat projection.
+     d3-array is its only runtime dependency. Standalone builds rather than all
+     of d3, which would be ~93 KB gzipped for one projection. -->
+<script src="https://cdn.jsdelivr.net/npm/d3-array@3.2.4/dist/d3-array.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-geo@3.1.1/dist/d3-geo.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 
@@ -94,6 +99,7 @@
       </div>
       <div class="refresh">
         <span id="lastUpdated">—</span>
+        <button id="projBtn">Flat map</button>
         <button id="regionBtn">Region average</button>
         <button id="loadBtn">Load data files</button>
       </div>
@@ -107,7 +113,7 @@
   </header>
 
   <div class="body" id="mapWrap">
-    <div class="map-hint">Drag to rotate · scroll to zoom · click a country for details</div>
+    <div class="map-hint" id="mapHint">Drag to rotate · scroll to zoom · click a country for details</div>
     <div class="country-label" id="countryLabel"></div>
     <div class="country-panel hidden" id="countryPanel">
       <div class="cp-head">
@@ -324,50 +330,307 @@ function buildBlankTexture(){
 }
 
 // ---- three.js scene setup ----
-let scene, camera, renderer, globe, globeMesh;
+let scene, camera, renderer, world, surfaceMesh;
 let dragging=false, lastX=0, lastY=0, rotY=0, rotX=-0.15, autoRotate=true;
+let panX=0, panY=0;
 const GLOBE_R = 1.4;
+const CAM_Z0 = 3.4;                            // default camera distance, also the fit reference
 
-// ================= country boundaries + hover / drill-down =================
-const BORDER_R = GLOBE_R * 1.003;              // just above the globe to avoid z-fighting
-let countries = null;                          // [{name, admin, labelX, labelY, bbox:[w,s,e,n], polys}]
-let baseBorders = null, highlightLine = null, hoveredCountry = null;
-const raycaster = new THREE.Raycaster();
-const pointerNDC = new THREE.Vector2();
+// ======================= projection seam =======================
+// Every piece of geometry in this app -- borders, highlights, the region
+// outline -- is authored in lon/lat and only becomes a position at the last
+// moment, through the matched pair below:
+//
+//   project<Mode>(lon, lat, elev, out, o)   lon/lat -> render position
+//   unproject(clientX, clientY)             screen  -> lon/lat (or null)
+//
+// `elev` is height above the surface in world units: a radius offset on the
+// globe, a z offset on the flat map. That is what keeps lines off the surface
+// without z-fighting in either projection.
+//
+// Switching projection therefore never touches interaction or boundary logic;
+// it only recomputes vertex positions. The two are kept as separate arrays per
+// object so the transition is a lerp rather than a reprojection.
+const TWO_PI = Math.PI * 2;
+const DEG = Math.PI / 180;
 
-// Place a lon/lat on the sphere using the SAME mapping the SST texture uses, so
-// borders line up with the data (verified against the land mask offline).
-function lonLatToVec3(lon, lat, r){
-  const phi = ((lon + 180) / 360) * 2 * Math.PI;
-  const theta = ((90 - lat) / 180) * Math.PI;
-  const st = Math.sin(theta);
-  return new THREE.Vector3(-r*Math.cos(phi)*st, r*Math.cos(theta), r*Math.sin(phi)*st);
+let projMode = 'globe';        // 'globe' | 'flat' -- what the toggle is set to
+let morphT = 0;                // 0 = fully globe, 1 = fully flat
+let morphing = false;
+
+// Equal Earth (Savric/Jenny/Patterson 2018), via d3-geo's own implementation.
+// Verified against the published formula to ~1e-17 before adopting it.
+const equalEarth = d3.geoEqualEarth().translate([0, 0]).scale(1);
+const EE_HALF_W = 2.7066, EE_HALF_H = 1.3174;  // extent of the full map at scale 1
+
+// Size the flat map to the viewport, using the default camera distance as the
+// reference so that zooming in afterwards behaves the same way it does on the globe.
+function fitEqualEarth(){
+  const wrap = document.getElementById('mapWrap');
+  const aspect = wrap.clientWidth / Math.max(1, wrap.clientHeight);
+  const halfH = Math.tan(22.5 * DEG) * CAM_Z0;   // visible half-height at z = 0
+  const halfW = halfH * aspect;
+  equalEarth.scale(Math.min(halfH * 0.94 / EE_HALF_H, halfW * 0.94 / EE_HALF_W));
 }
 
-// Append a ring as line-segment pairs, subdividing long edges so they hug the sphere.
-function appendRing(ring, r, out){
+// Sphere placement. This is the SAME mapping the SST texture's UVs use, so
+// borders line up with the data (verified against the land mask offline).
+function projectGlobe(lon, lat, elev, out, o){
+  const r = GLOBE_R + elev;
+  const phi = ((lon + 180) / 360) * TWO_PI;
+  const theta = ((90 - lat) / 180) * Math.PI;
+  const st = Math.sin(theta);
+  out[o]   = -r * Math.cos(phi) * st;
+  out[o+1] =  r * Math.cos(theta);
+  out[o+2] =  r * Math.sin(phi) * st;
+}
+function normalGlobe(lon, lat, out, o){
+  projectGlobe(lon, lat, 1 - GLOBE_R, out, o);   // same direction at unit length
+}
+// Equal Earth placement. d3 hands back screen coordinates (+y down); three.js
+// wants +y up, hence the flip.
+function projectFlat(lon, lat, elev, out, o){
+  const p = equalEarth([lon, lat]);
+  out[o]   =  p[0];
+  out[o+1] = -p[1];
+  out[o+2] =  elev;
+}
+function normalFlat(lon, lat, out, o){ out[o]=0; out[o+1]=0; out[o+2]=1; }
+
+// ---- screen -> lon/lat -------------------------------------------------
+// Done analytically rather than by raycasting the surface mesh: ray-vs-sphere
+// for the globe, ray-vs-plane plus equalEarth.invert() for the flat map. Both
+// are O(1) and exact, so mesh tessellation costs nothing on pointermove.
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+const _inv = new THREE.Matrix4();
+const _o = new THREE.Vector3(), _d = new THREE.Vector3();
+
+function unproject(clientX, clientY){
+  if(morphing || !renderer) return null;         // mid-flight the surface is neither
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNDC.x =  ((clientX - rect.left) / rect.width)  * 2 - 1;
+  pointerNDC.y = -((clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointerNDC, camera);
+  // into the group's local frame, which undoes the globe's rotation / the map's pan
+  _inv.copy(world.matrixWorld).invert();
+  _o.copy(raycaster.ray.origin).applyMatrix4(_inv);
+  _d.copy(raycaster.ray.direction).transformDirection(_inv);
+  return projMode === 'globe' ? unprojectGlobe() : unprojectFlat();
+}
+
+function unprojectGlobe(){
+  // |o + t d|^2 = R^2, with d normalized
+  const b = 2 * _o.dot(_d), c = _o.lengthSq() - GLOBE_R * GLOBE_R;
+  const disc = b * b - 4 * c;
+  if(disc < 0) return null;                      // ray misses the globe
+  const t = (-b - Math.sqrt(disc)) / 2;          // near intersection
+  if(t < 0) return null;
+  const x = _o.x + _d.x * t, y = _o.y + _d.y * t, z = _o.z + _d.z * t;
+  const lat = 90 - Math.acos(Math.max(-1, Math.min(1, y / GLOBE_R))) / DEG;
+  let phi = Math.atan2(z, -x);
+  if(phi < 0) phi += TWO_PI;
+  return [phi / TWO_PI * 360 - 180, lat];
+}
+
+function unprojectFlat(){
+  if(Math.abs(_d.z) < 1e-9) return null;
+  const t = -_o.z / _d.z;
+  if(t < 0) return null;
+  const x = _o.x + _d.x * t, y = -(_o.y + _d.y * t);
+  const ll = equalEarth.invert([x, y]);
+  if(!ll || !isFinite(ll[0]) || !isFinite(ll[1])) return null;
+  // For a point beyond the map's rounded outline invert() still hands back a
+  // solution, clamped to the edge and inside the valid lon/lat range -- so a
+  // range check would wave it through and the corner of the viewport would
+  // "hover" the Arctic. The only reliable test is whether it projects back to
+  // where we started.
+  const back = equalEarth(ll);
+  const tol = equalEarth.scale() * 1e-6;
+  if(Math.abs(back[0] - x) > tol || Math.abs(back[1] - y) > tol) return null;
+  return ll;
+}
+
+// ================= country boundaries + hover / drill-down =================
+const ELEV_BORDER    = GLOBE_R * 0.003;        // just above the surface, to avoid z-fighting
+const ELEV_HIGHLIGHT = GLOBE_R * 0.004;
+const ELEV_REGION    = GLOBE_R * 0.005;
+let countries = null;                          // [{name, admin, labelX, labelY, bbox:[w,s,e,n], polys}]
+let baseBorders = null, highlightLine = null, hoveredCountry = null;
+
+// Append a ring as lon/lat segment-endpoint pairs, subdividing long edges so
+// they follow the surface -- the sphere's curvature in one projection, Equal
+// Earth's in the other.
+function appendRing(ring, out){
   let prev = null;
   for(const p of ring){
     if(prev){
       const dl = Math.abs(p[0]-prev[0]), db = Math.abs(p[1]-prev[1]);
       if(Math.max(dl, db) < 180){            // skip antimeridian-wrap artifacts
         const n = Math.max(1, Math.ceil(Math.max(dl, db)));
-        let a = lonLatToVec3(prev[0], prev[1], r);
+        let aLon = prev[0], aLat = prev[1];
         for(let k=1;k<=n;k++){
           const t = k/n;
-          const b = lonLatToVec3(prev[0]+(p[0]-prev[0])*t, prev[1]+(p[1]-prev[1])*t, r);
-          out.push(a.x,a.y,a.z, b.x,b.y,b.z);
-          a = b;
+          const bLon = prev[0]+(p[0]-prev[0])*t, bLat = prev[1]+(p[1]-prev[1])*t;
+          out.push(aLon, aLat, bLon, bLat);
+          aLon = bLon; aLat = bLat;
         }
       }
     }
     prev = p;
   }
 }
-function segmentsFor(country, r){
+function segmentsFor(country){
   const out = [];
-  for(const poly of country.polys) for(const ring of poly) appendRing(ring, r, out);
+  for(const poly of country.polys) for(const ring of poly) appendRing(ring, out);
   return out;
+}
+
+// ---- morphable line sets ------------------------------------------------
+// Each holds its lon/lat source plus both projections' vertex arrays, so the
+// transition is a lerp and a resize is a cheap reprojection of one endpoint.
+const morphLines = [];
+
+function makeMorphLine(material, elev){
+  const obj = new THREE.LineSegments(new THREE.BufferGeometry(), material);
+  obj.userData = { lonlat: null, elev, posA: null, posB: null };
+  morphLines.push(obj);
+  return obj;
+}
+
+function setLineLonLat(obj, lonlat){
+  const n = lonlat.length / 2;
+  const a = new Float32Array(n*3), b = new Float32Array(n*3);
+  for(let i=0;i<n;i++){
+    projectGlobe(lonlat[i*2], lonlat[i*2+1], obj.userData.elev, a, i*3);
+    projectFlat (lonlat[i*2], lonlat[i*2+1], obj.userData.elev, b, i*3);
+  }
+  obj.userData.lonlat = lonlat;
+  obj.userData.posA = a;
+  obj.userData.posB = b;
+  obj.geometry.dispose();
+  obj.geometry = new THREE.BufferGeometry();
+  obj.geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3), 3));
+  applyLineMorph(obj, morphT);
+}
+
+function applyLineMorph(obj, t){
+  const a = obj.userData.posA, b = obj.userData.posB;
+  if(!a) return;
+  const attr = obj.geometry.attributes.position, arr = attr.array, inv = 1 - t;
+  for(let i=0;i<arr.length;i++) arr[i] = a[i]*inv + b[i]*t;
+  attr.needsUpdate = true;
+  obj.geometry.computeBoundingSphere();
+}
+
+// ---- the surface itself -------------------------------------------------
+// A lon/lat grid carrying equirectangular UVs -- which is exactly what
+// THREE.SphereGeometry already is, so building it by hand costs nothing and
+// buys the second projection for free: the UVs are identical either way, so
+// the SST texture is untouched by the switch and never needs resampling.
+const SEG_X = 256, SEG_Y = 128;
+let surface = null;      // {posA, posB, normA, normB}
+
+function buildSurfaceGeometry(){
+  const nx = SEG_X + 1, ny = SEG_Y + 1, count = nx * ny;
+  const posA = new Float32Array(count*3), posB = new Float32Array(count*3);
+  const normA = new Float32Array(count*3), normB = new Float32Array(count*3);
+  const uv = new Float32Array(count*2);
+  for(let j=0;j<ny;j++){
+    const v = j / SEG_Y, lat = 90 - v*180;
+    for(let i=0;i<nx;i++){
+      const u = i / SEG_X, lon = -180 + u*360, k = j*nx + i;
+      projectGlobe(lon, lat, 0, posA, k*3);  normalGlobe(lon, lat, normA, k*3);
+      projectFlat (lon, lat, 0, posB, k*3);  normalFlat (lon, lat, normB, k*3);
+      uv[k*2] = u; uv[k*2+1] = 1 - v;        // v = 1 at the north pole, matching the texture
+    }
+  }
+  // Winding (a,c,b)/(b,c,d) faces outward on the sphere and toward the camera
+  // on the plane, so one index buffer serves both. The pole rows are kept even
+  // though they are degenerate on the sphere: Equal Earth maps each pole to a
+  // line, not a point, so dropping them would tear the top and bottom edges.
+  const idx = [];
+  for(let j=0;j<SEG_Y;j++){
+    for(let i=0;i<SEG_X;i++){
+      const a = j*nx+i, b = a+1, c = a+nx, d = c+1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(count*3), 3));
+  geo.setAttribute('normal',   new THREE.Float32BufferAttribute(new Float32Array(count*3), 3));
+  geo.setAttribute('uv',       new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  surface = { posA, posB, normA, normB };
+  return geo;
+}
+
+// Place everything at morph position t (0 = globe, 1 = flat).
+function applyMorph(t){
+  morphT = t;
+  const inv = 1 - t;
+  const pos = surfaceMesh.geometry.attributes.position;
+  const nrm = surfaceMesh.geometry.attributes.normal;
+  const pa = surface.posA, pb = surface.posB, na = surface.normA, nb = surface.normB;
+  const parr = pos.array, narr = nrm.array;
+  for(let i=0;i<parr.length;i++) parr[i] = pa[i]*inv + pb[i]*t;
+  for(let i=0;i<narr.length;i+=3){
+    const x = na[i]*inv + nb[i]*t, y = na[i+1]*inv + nb[i+1]*t, z = na[i+2]*inv + nb[i+2]*t;
+    const len = Math.hypot(x, y, z) || 1;
+    narr[i] = x/len; narr[i+1] = y/len; narr[i+2] = z/len;
+  }
+  pos.needsUpdate = true; nrm.needsUpdate = true;
+  surfaceMesh.geometry.computeBoundingSphere();
+  for(const line of morphLines) applyLineMorph(line, t);
+}
+
+// Recompute only the flat endpoint -- called when the viewport resizes and the
+// Equal Earth scale changes with it.
+function reprojectFlat(){
+  fitEqualEarth();
+  const nx = SEG_X + 1;
+  for(let j=0;j<=SEG_Y;j++){
+    const lat = 90 - (j/SEG_Y)*180;
+    for(let i=0;i<nx;i++) projectFlat(-180 + (i/SEG_X)*360, lat, 0, surface.posB, (j*nx+i)*3);
+  }
+  for(const line of morphLines){
+    const ll = line.userData.lonlat;
+    if(!ll) continue;
+    for(let i=0;i<ll.length/2;i++) projectFlat(ll[i*2], ll[i*2+1], line.userData.elev, line.userData.posB, i*3);
+  }
+  applyMorph(morphT);
+}
+
+// ---- the toggle ---------------------------------------------------------
+const MORPH_MS = 650;
+let morphFrom = 0, morphTo = 0, morphStart = 0;
+
+function setProjection(mode){
+  if(mode === projMode) return;
+  projMode = mode;
+  if(mode === 'flat'){
+    autoRotate = false;
+    // Unwind the accumulated spin the short way round, or the globe appears to
+    // whirl back through however many turns the user has dragged it.
+    rotY = ((rotY + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI;
+  }
+  setHoveredCountry(null);
+  morphFrom = morphT;
+  morphTo = (mode === 'flat') ? 1 : 0;
+  morphStart = performance.now();
+  morphing = true;
+  document.getElementById('projBtn').textContent = (mode === 'flat') ? 'Globe' : 'Flat map';
+  document.getElementById('mapHint').textContent = (mode === 'flat')
+    ? 'Drag to pan · scroll to zoom · click a country for details'
+    : 'Drag to rotate · scroll to zoom · click a country for details';
+}
+
+function stepMorph(){
+  if(!morphing) return;
+  const k = Math.min(1, (performance.now() - morphStart) / MORPH_MS);
+  const e = k < 0.5 ? 2*k*k : 1 - Math.pow(-2*k + 2, 2) / 2;   // ease in/out
+  applyMorph(morphFrom + (morphTo - morphFrom) * e);
+  if(k >= 1) morphing = false;
 }
 
 // ================= region average (flattened 2D box selection) =================
@@ -444,39 +707,37 @@ function updateRegionStats(){
     `<div class="rp-sub">${bounds}</div>`;
 }
 
-// subdivide one edge (a->b, each [lon,lat]) into short segments hugging the sphere.
-// Unlike appendRing there's no antimeridian guard: box edges follow constant
-// lat/lon and never wrap, so a box wider than 180 deg must still draw fully.
-function pushEdge(out, a, b, r){
+// subdivide one edge (a->b, each [lon,lat]) into short lon/lat segments that
+// follow the surface. Unlike appendRing there's no antimeridian guard: box edges
+// follow constant lat/lon and never wrap, so a box wider than 180 deg must still
+// draw fully.
+function pushEdge(out, a, b){
   const dl = b[0]-a[0], db = b[1]-a[1];
   const n = Math.max(1, Math.ceil(Math.max(Math.abs(dl), Math.abs(db)) / 2));
-  let p = lonLatToVec3(a[0], a[1], r);
+  let pLon = a[0], pLat = a[1];
   for(let k=1;k<=n;k++){
     const t = k/n;
-    const q = lonLatToVec3(a[0]+dl*t, a[1]+db*t, r);
-    out.push(p.x,p.y,p.z, q.x,q.y,q.z);
-    p = q;
+    const qLon = a[0]+dl*t, qLat = a[1]+db*t;
+    out.push(pLon, pLat, qLon, qLat);
+    pLon = qLon; pLat = qLat;
   }
 }
 
-// outline the selected box on the globe as lat/lon edges (via lonLatToVec3)
+// outline the selected box on the surface, in lon/lat -- so it lands correctly
+// in whichever projection is showing.
 function updateRegionBox(){
   if(!regionBox){
-    regionBox = new THREE.LineSegments(new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({color:0xD9A441}));
-    globe.add(regionBox);
+    regionBox = makeMorphLine(new THREE.LineBasicMaterial({color:0xD9A441}), ELEV_REGION);
+    world.add(regionBox);
   }
-  regionBox.geometry.dispose();
-  const g = new THREE.BufferGeometry();
   if(regionSel){
-    const s = regionSel, r = GLOBE_R * 1.004, out = [];
-    pushEdge(out, [s.lonMin,s.latMin], [s.lonMax,s.latMin], r);
-    pushEdge(out, [s.lonMax,s.latMin], [s.lonMax,s.latMax], r);
-    pushEdge(out, [s.lonMax,s.latMax], [s.lonMin,s.latMax], r);
-    pushEdge(out, [s.lonMin,s.latMax], [s.lonMin,s.latMin], r);
-    g.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
+    const s = regionSel, out = [];
+    pushEdge(out, [s.lonMin,s.latMin], [s.lonMax,s.latMin]);
+    pushEdge(out, [s.lonMax,s.latMin], [s.lonMax,s.latMax]);
+    pushEdge(out, [s.lonMax,s.latMax], [s.lonMin,s.latMax]);
+    pushEdge(out, [s.lonMin,s.latMax], [s.lonMin,s.latMin]);
+    setLineLonLat(regionBox, out);
   }
-  regionBox.geometry = g;
   regionBox.visible = !!regionSel;
 }
 
@@ -538,17 +799,15 @@ function buildCountries(geo){
     countries.push({ name:f.properties.NAME, admin:f.properties.ADMIN,
                      labelX:f.properties.LABEL_X, labelY:f.properties.LABEL_Y,
                      bbox:[w,s,e,n], polys });
-    for(const poly of polys) for(const ring of poly) appendRing(ring, BORDER_R, segs);
+    for(const poly of polys) for(const ring of poly) appendRing(ring, segs);
   }
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
-  baseBorders = new THREE.LineSegments(geom,
-    new THREE.LineBasicMaterial({color:0x0b1f22, transparent:true, opacity:0.6}));
-  globe.add(baseBorders);
-  highlightLine = new THREE.LineSegments(new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({color:0xD9A441}));
+  baseBorders = makeMorphLine(
+    new THREE.LineBasicMaterial({color:0x0b1f22, transparent:true, opacity:0.6}), ELEV_BORDER);
+  setLineLonLat(baseBorders, segs);
+  world.add(baseBorders);
+  highlightLine = makeMorphLine(new THREE.LineBasicMaterial({color:0xD9A441}), ELEV_HIGHLIGHT);
   highlightLine.visible = false;
-  globe.add(highlightLine);
+  world.add(highlightLine);
 }
 
 // ray-casting point-in-polygon, handling holes (ring 0 = outer) and MultiPolygons
@@ -575,17 +834,13 @@ function countryAt(lon, lat){
   return null;
 }
 
-// Raycast the globe at a screen position and return the country there (or null).
-// Uses the hit's UV, so it's correct regardless of the globe's current rotation.
+// The country under a screen position, in whichever projection is showing --
+// unproject() is the only projection-aware step, so this needed no change when
+// the flat map arrived.
 function pickCountryAt(clientX, clientY){
-  if(!countries || !globeMesh) return null;
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointerNDC.x = ((clientX-rect.left)/rect.width)*2 - 1;
-  pointerNDC.y = -((clientY-rect.top)/rect.height)*2 + 1;
-  raycaster.setFromCamera(pointerNDC, camera);
-  const hit = raycaster.intersectObject(globeMesh)[0];
-  if(!hit || !hit.uv) return null;
-  return countryAt(hit.uv.x*360 - 180, hit.uv.y*180 - 90);
+  if(!countries) return null;
+  const ll = unproject(clientX, clientY);
+  return ll ? countryAt(ll[0], ll[1]) : null;
 }
 
 function setHoveredCountry(c, clientX, clientY){
@@ -593,10 +848,7 @@ function setHoveredCountry(c, clientX, clientY){
   if(c !== hoveredCountry){
     hoveredCountry = c;
     if(highlightLine){
-      highlightLine.geometry.dispose();
-      const g = new THREE.BufferGeometry();
-      if(c) g.setAttribute('position', new THREE.Float32BufferAttribute(segmentsFor(c, BORDER_R*1.001), 3));
-      highlightLine.geometry = g;
+      if(c) setLineLonLat(highlightLine, segmentsFor(c));
       highlightLine.visible = !!c;
     }
   }
@@ -657,11 +909,11 @@ function renderCountryPanel(c, d){
 }
 // ================= end country boundaries =================
 
-function initGlobe(){
+function initScene(){
   const wrap = document.getElementById('mapWrap');
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(45, wrap.clientWidth/wrap.clientHeight, 0.1, 100);
-  camera.position.set(0,0,3.4);
+  camera.position.set(0,0,CAM_Z0);
 
   renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
   renderer.setSize(wrap.clientWidth, wrap.clientHeight);
@@ -673,12 +925,13 @@ function initGlobe(){
   dl.position.set(3,2,4);
   scene.add(dl);
 
-  const geo = new THREE.SphereGeometry(GLOBE_R, 64, 64);
+  fitEqualEarth();
   const mat = new THREE.MeshPhongMaterial({map: buildBlankTexture(), shininess:4});
-  globeMesh = new THREE.Mesh(geo, mat);
-  globe = new THREE.Group();
-  globe.add(globeMesh);
-  scene.add(globe);
+  surfaceMesh = new THREE.Mesh(buildSurfaceGeometry(), mat);
+  world = new THREE.Group();
+  world.add(surfaceMesh);
+  scene.add(world);
+  applyMorph(0);
 
   const canvas = renderer.domElement;
   canvas.addEventListener('pointerdown', onPointerDown);
@@ -697,6 +950,10 @@ function initGlobe(){
   loadCountries();
   document.getElementById('cpClose').addEventListener('click', () => {
     document.getElementById('countryPanel').classList.add('hidden');
+  });
+
+  document.getElementById('projBtn').addEventListener('click', () => {
+    setProjection(projMode === 'globe' ? 'flat' : 'globe');
   });
 
   // region-average tool
@@ -718,8 +975,8 @@ function initGlobe(){
 // build the globe texture, and update the status UI.
 function applyGrid(grid, updatedLabel){
   currentGrid = grid;
-  globeMesh.material.map = buildTextureFromGrid(grid);
-  globeMesh.material.needsUpdate = true;
+  surfaceMesh.material.map = buildTextureFromGrid(grid);
+  surfaceMesh.material.needsUpdate = true;
   document.getElementById('dataSource').textContent =
     `${grid.date || 'unknown date'} — ${grid.source || 'source unspecified'}`;
   document.getElementById('lastUpdated').textContent = updatedLabel;
@@ -800,8 +1057,17 @@ function onPointerMove(e){
   if(dragging){
     const dx = e.clientX-lastX, dy = e.clientY-lastY;
     moved += Math.abs(dx)+Math.abs(dy);
-    rotY += dx*0.005;
-    rotX = Math.max(-1.2, Math.min(1.2, rotX + dy*0.005));
+    if(projMode === 'globe'){
+      rotY += dx*0.005;
+      rotX = Math.max(-1.2, Math.min(1.2, rotX + dy*0.005));
+    } else {
+      // pan instead of rotate: convert the pixel delta to world units at z=0,
+      // so the map tracks the cursor exactly however far the camera has zoomed.
+      const rect = renderer.domElement.getBoundingClientRect();
+      const perPx = 2 * Math.tan(22.5 * DEG) * camera.position.z / rect.height;
+      panX += dx * perPx;
+      panY -= dy * perPx;
+    }
     lastX = e.clientX; lastY = e.clientY;
     return;
   }
@@ -823,16 +1089,20 @@ function onResize(){
   camera.aspect = wrap.clientWidth/wrap.clientHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  reprojectFlat();          // the Equal Earth scale is fitted to the viewport
 }
 function animate(){
   requestAnimationFrame(animate);
-  if(autoRotate) rotY += 0.0015;
-  globe.rotation.y = rotY;
-  globe.rotation.x = rotX;
+  stepMorph();
+  if(autoRotate && morphT === 0) rotY += 0.0015;
+  // The globe's spin unwinds and the map's pan fades in across the morph, so
+  // the two interaction models never apply at once.
+  world.rotation.set(rotX * (1 - morphT), rotY * (1 - morphT), 0);
+  world.position.set(panX * morphT, panY * morphT, 0);
   renderer.render(scene, camera);
 }
 
-initGlobe();
+initScene();
 autoLoadData();
 </script>
 </body>

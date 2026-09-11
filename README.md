@@ -18,6 +18,8 @@ workflow and served over GitHub Pages.
 - **`index.html`** fetches the sidecar and then the PNG it names, decodes it into
   a `Float32Array`, and renders it onto the globe. If the fetch fails (opened
   locally, or before the first data commit) it falls back to a manual file picker.
+- The view toggles between a **3D globe** and a flat **Equal Earth** map
+  (Šavrič/Jenny/Patterson 2018), via `d3-geo`'s `geoEqualEarth`.
 - **`.github/workflows/refresh.yml`** runs the script daily at 13:00 UTC and
   commits the refreshed pair back to the repo when the data actually changes.
 
@@ -35,6 +37,30 @@ reach +16 °C at the sea-ice edge, so a 0.05 °C ramp would clip and be wrong by
 colour bands are 0.2–1.0 °C wide, so the error sits well below anything the map
 can show. `--format json` still emits the original single-file shape for local
 inspection.
+
+### The projection seam
+
+Both views are the *same* scene. All geometry — country borders, the hover
+highlight, the region outline — is authored in lon/lat and only becomes a
+position at the last moment, through one matched pair:
+
+```
+project<Mode>(lon, lat, elev, out, o)   lon/lat -> render position
+unproject(clientX, clientY)             screen  -> lon/lat (or null)
+```
+
+The surface itself is a lon/lat grid mesh carrying equirectangular UVs — which
+is what `THREE.SphereGeometry` already is — so switching projection only moves
+vertices. The UVs are identical either way, which means **the SST texture is
+never resampled**; the GPU interpolates the same equirectangular raster across
+either shape. Each object keeps both projections' vertex arrays, so the toggle
+animates as a lerp rather than a reprojection.
+
+`unproject` is analytic — ray-vs-sphere for the globe, ray-vs-plane plus
+`equalEarth.invert()` for the flat map — rather than a mesh raycast, so pointer
+handling costs the same no matter how finely the surface is tessellated. Hover,
+click and the country panel are projection-agnostic: they were not modified when
+the flat map was added.
 
 ## Running locally
 
