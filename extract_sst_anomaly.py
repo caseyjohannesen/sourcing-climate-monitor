@@ -55,6 +55,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+
+import archive as arch
 import requests
 import xarray as xr
 
@@ -465,6 +467,9 @@ def main():
     parser.add_argument("--sst-file", help="(testing) path to a local SST NetCDF instead of the live URL")
     parser.add_argument("--clim-file", help="(testing) path to a local climatology NetCDF instead of the live download")
     parser.add_argument("--refresh-climatology", action="store_true", help="force re-download of the cached climatology file")
+    parser.add_argument("--archive", nargs="?", const=arch.ARCHIVE_DIR, default=None,
+                        help=f"also write a {arch.ARCHIVE_STEP_DEG} deg frame and the Nino 3.4 point "
+                             f"into this archive directory (default {arch.ARCHIVE_DIR})")
     args = parser.parse_args()
 
     out = args.out or ("sst_anomaly.png" if args.format == "png" else "sst_anomaly.json")
@@ -502,6 +507,33 @@ def main():
     print(f"Wrote {out}: {meta['date']}, {meta['grid']['width']}x{meta['grid']['height']} "
           f"({size/1e6:.2f} MB), {meta['stats']['ocean_cells']:,} ocean cells")
     print(f"Wrote {meta_path}: {os.path.getsize(meta_path)/1e3:.1f} KB")
+
+    if args.archive:
+        update_archive(args.archive, levels, meta)
+
+
+def update_archive(root, levels, meta):
+    """Add today's frame and Nino 3.4 point to the archive, and prune the window.
+
+    The index is computed from the *decoded* levels, not from the float grid, so
+    it is the same number the browser arrives at from the same PNG -- quantization
+    included. Otherwise the series' last point and the live readout beside it
+    would disagree in the third decimal for no good reason.
+    """
+    lut = np.array([np.nan if v is None else v for v in meta["encoding"]["lut"]], dtype="float64")
+    decoded = lut[levels]
+
+    value, cells = arch.nino34_index(decoded, meta["grid"])
+    factor = int(round(arch.ARCHIVE_STEP_DEG / meta["grid"]["step_deg"]))
+    frame = arch.downsample(decoded, factor)
+    frame_levels, _, _ = quantize(frame)
+
+    index, series = arch.write_archive(
+        root, [(meta["date"], frame_levels)],
+        [{"d": meta["date"], "v": None if value is None else round(value, 4)}],
+        meta, factor)
+    print(f"Archive: {len(index['frames'])} frames at {index['resolution_deg']} deg, "
+          f"Nino 3.4 {value:+.3f} C over {cells:,} cells, series {len(series)} points")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,67 @@
+name: Backfill frame archive
+
+# One-time (or occasional) historical fill of the 0.5 deg frame archive and the
+# Nino 3.4 series. The daily refresh extends the window forward one day at a
+# time; this populates it going back, so the playback timeline and the sparkline
+# are usable immediately instead of six months from now.
+#
+# Manual only. It downloads a few hundred MB from NOAA and rewrites ~180 frames,
+# which is not something to do on a schedule.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days of history to fill"
+        required: false
+        default: "180"
+
+permissions:
+  contents: write
+
+# Never let this overlap the daily refresh -- both write archive/ and push.
+concurrency:
+  group: refresh-sst
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install xarray netCDF4 pandas numpy requests pillow
+
+      # Same cache as the daily job, so this reuses the climatology if the daily
+      # run has already fetched it (and populates it if not).
+      - name: Cache 1991-2020 climatology
+        uses: actions/cache@v5
+        with:
+          path: sst.day.mean.ltm.1991-2020.nc
+          key: oisst-climatology-highres-1991-2020-v2
+
+      - name: Backfill the archive
+        run: python backfill_archive.py --days ${{ github.event.inputs.days || 180 }}
+
+      - name: Commit the archive
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add archive
+          if git diff --cached --quiet; then
+            echo "Archive unchanged; nothing to commit."
+          else
+            # Pull with rebase first: this job is long-running and the daily
+            # refresh may have pushed while it was downloading.
+            git pull --rebase --autostash origin main || true
+            git add archive
+            git commit -m "Backfill frame archive (${{ github.event.inputs.days || 180 }} days)"
+            git push
+          fi

@@ -44,7 +44,7 @@ jobs:
           key: oisst-climatology-highres-1991-2020-v2
 
       - name: Extract latest SST anomaly
-        run: python extract_sst_anomaly.py --out sst_anomaly.png
+        run: python extract_sst_anomaly.py --out sst_anomaly.png --archive
 
       - name: Commit refreshed data if the SST data changed
         run: |
@@ -75,10 +75,15 @@ jobs:
           fi
           rm -f prev.meta.json
 
+          # The archive is judged by the same verdict rather than on its own:
+          # re-running on an unchanged day still rewrites its manifest timestamps,
+          # so diffing it directly would commit every single day for no reason.
           if $png_same && $meta_same; then
             echo "SST data unchanged (only generated_at differs); nothing to commit."
+            git checkout -- archive 2>/dev/null || true   # drop the timestamp churn
+            git clean -fd archive 2>/dev/null || true
           else
-            git add sst_anomaly.png sst_anomaly.meta.json
+            git add sst_anomaly.png sst_anomaly.meta.json archive
             git commit -m "Refresh SST anomaly ($(date -u +%Y-%m-%d))"
             git push
           fi
