@@ -45,6 +45,11 @@
   .map-caption .status{color:var(--gold);}
   .map-hint{position:absolute;top:14px;right:20px;font-size:11px;color:var(--muted);background:rgba(15,42,46,0.7);padding:6px 10px;border-radius:5px;}
 
+  /* sits clear of the caption below and the country panel above */
+  .back-btn{position:absolute;bottom:52px;left:20px;background:var(--panel);border:1px solid var(--line);color:var(--paper);padding:7px 13px;border-radius:5px;font-size:12px;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(0,0,0,0.35);}
+  .back-btn:hover{border-color:var(--gold);}
+  .back-btn.hidden{display:none;}
+
   .legend{position:absolute;bottom:14px;right:20px;background:rgba(15,42,46,0.75);padding:10px 12px;border-radius:5px;}
   .legend .bar{display:flex;width:220px;height:10px;border-radius:3px;overflow:hidden;margin-bottom:4px;}
   .legend .bar span{flex:1;}
@@ -138,6 +143,7 @@
         <button class="rp-clear" id="rpClear">Clear</button>
       </div>
     </div>
+    <button class="back-btn hidden" id="backBtn">← Back to world view</button>
     <div class="map-caption">Sea surface temperature anomaly · <span class="status" id="dataSource">no data loaded</span></div>
     <div class="legend">
       <div class="title">SST anomaly (°C)</div>
@@ -978,7 +984,11 @@ function closeRegionPanel(){
 // Borders are optional: if the fetch fails (file://, or a first-run miss) the
 // globe still works, just without the overlay.
 function loadCountries(){
-  fetch('./countries.geojson', {cache: 'force-cache'})
+  // NOT force-cache: that returns a cached match fresh *or stale* and never
+  // revalidates, so a browser that loaded an older release would keep serving
+  // it forever. This file gains properties between releases -- ADM0_A3 arrived
+  // with the district feature -- so it has to be allowed to revalidate.
+  fetch('./countries.geojson', {cache: 'default'})
     .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(buildCountries)
     .catch(() => {});
@@ -994,7 +1004,12 @@ function buildCountries(geo){
       if(pt[0]<w)w=pt[0]; if(pt[0]>e)e=pt[0]; if(pt[1]<s)s=pt[1]; if(pt[1]>n)n=pt[1];
     }
     countries.push({ name:f.properties.NAME, admin:f.properties.ADMIN,
-                     adm0:f.properties.ADM0_A3,     // key for admin1/<ISO>.geojson
+                     // key for admin1/<ISO>.geojson. ADM0_A3 is the right one --
+                     // ISO_A3 is "-99" for France, Norway and three others -- but
+                     // fall back to it so a stale cached countries.geojson still
+                     // resolves districts for the other 172 countries.
+                     adm0:f.properties.ADM0_A3
+                          || (f.properties.ISO_A3 !== '-99' ? f.properties.ISO_A3 : null),
                      labelX:f.properties.LABEL_X, labelY:f.properties.LABEL_Y,
                      bbox:[w,s,e,n], polys });
     for(const poly of polys) for(const ring of poly) appendRing(ring, segs);
@@ -1272,27 +1287,45 @@ function stepFlight(){
   if(k >= 1) viewTween = null;
 }
 
+function updateFocusUI(){
+  const b = document.getElementById('backBtn');
+  if(b) b.classList.toggle('hidden', !focusedCountry);
+}
+
 function focusCountry(c){
+  // Only the first focus records the way back, so hopping A -> B -> C and then
+  // backing out returns to the overview rather than to country B.
   if(!focusedCountry) viewBeforeFocus = currentView();
   focusedCountry = c;
   flyTo(focusTargetFor(c));
   showAdmin1(c);
+  updateFocusUI();
 }
 
+// Drop the district detail and fly back out.
 function clearFocus(){
-  if(focusedCountry && viewBeforeFocus) flyTo(viewBeforeFocus);
+  if(focusedCountry) flyTo(viewBeforeFocus || { rotX, rotY, panX: 0, panY: 0, z: CAM_Z0 });
   focusedCountry = null;
   viewBeforeFocus = null;
   adminIso = null;
   adminDistricts = null;
   if(adminLine) adminLine.visible = false;
+  setHoveredCountry(null);
+  updateFocusUI();
+}
+
+// What both the back button and the panel's close box do: clear the selection
+// entirely and return to the world view.
+function exitToWorld(){
+  document.getElementById('countryPanel').classList.add('hidden');
+  clearFocus();
 }
 
 // ---- admin-1 ------------------------------------------------------------
 function loadAdminIndex(){
   // The manifest lets the panel say "no districts" without first firing a
   // request that 404s.
-  fetch('./admin1/index.json', {cache: 'force-cache'})
+  fetch('./admin1/index.json', {cache: 'default'})
     .then(r => r.ok ? r.json() : {})
     .then(j => { adminIndex = j; })
     .catch(() => { adminIndex = {}; });
@@ -1320,7 +1353,7 @@ function showAdmin1(c){
     return;
   }
   setAdminNote('Loading districts…');
-  fetch(`./admin1/${iso}.geojson`, {cache: 'force-cache'})
+  fetch(`./admin1/${iso}.geojson`, {cache: 'default'})
     .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(geo => {
       adminCache.set(iso, geo);
@@ -1409,10 +1442,8 @@ function initScene(){
   buildLegend();
   loadCountries();
   loadAdminIndex();
-  document.getElementById('cpClose').addEventListener('click', () => {
-    document.getElementById('countryPanel').classList.add('hidden');
-    clearFocus();                               // and fly back to where we were
-  });
+  document.getElementById('cpClose').addEventListener('click', exitToWorld);
+  document.getElementById('backBtn').addEventListener('click', exitToWorld);
 
   document.getElementById('projBtn').addEventListener('click', () => {
     setProjection(projMode === 'globe' ? 'flat' : 'globe');
@@ -1429,7 +1460,7 @@ function initScene(){
   document.getElementById('rpClear').addEventListener('click', clearPolygon);
   canvas.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('keydown', (e) => {
-    if(e.key === 'Escape') clearPolygon();
+    if(e.key === 'Escape'){ focusedCountry ? exitToWorld() : clearPolygon(); }
     else if(e.key === 'Backspace' && polyPins.length){ e.preventDefault(); undoPin(); }
     else if(e.key === 'Enter' && !polyClosed && polyPins.length > 2) closePolygon();
   });
