@@ -30,7 +30,10 @@ jobs:
       - name: Install dependencies
         # No scipy: the highres climatology shares the daily field's 0.25 deg grid,
         # so extract_sst_anomaly.py subtracts directly instead of interpolating.
-        run: pip install xarray netCDF4 pandas numpy requests pillow
+        # rasterio is for the per-country drought layers: it reads the NIDIS
+        # Cloud-Optimized GeoTIFFs and rasterises country polygons for the
+        # zonal means.
+        run: pip install xarray netCDF4 pandas numpy requests pillow rasterio
 
       # The 1991-2020 climatology (~350MB at 0.25 deg) never changes, so cache it
       # across runs instead of re-downloading from NOAA every day. Runners are
@@ -46,7 +49,15 @@ jobs:
       - name: Extract latest SST anomaly
         run: python extract_sst_anomaly.py --out sst_anomaly.png --archive
 
-      - name: Commit refreshed data if the SST data changed
+      # Independent of the SST extraction above: different sources, different
+      # cadences (SPI/SPEI daily, vegetation health weekly). A failure here must
+      # not cost the SST refresh, and the script already degrades layer by layer,
+      # so the step is allowed to fail without failing the job.
+      - name: Extract per-country drought layers
+        continue-on-error: true
+        run: python extract_drought_layers.py --out drought_country.json
+
+      - name: Commit refreshed data if anything changed
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -78,12 +89,40 @@ jobs:
           # The archive is judged by the same verdict rather than on its own:
           # re-running on an unchanged day still rewrites its manifest timestamps,
           # so diffing it directly would commit every single day for no reason.
+          # The drought layers are judged separately from the SST data: they come
+          # from other sources on other cadences, so either can change on a day
+          # the other does not. Same generated_at-stripped comparison as above.
+          drought_same=false
+          if [ -f drought_country.json ]; then
+            if git show HEAD:drought_country.json > prev.drought.json 2>/dev/null \
+               && python -c "import json,sys; s=lambda p:{k:v for k,v in json.load(open(p)).items() if k!='generated_at'}; sys.exit(0 if s('prev.drought.json')==s('drought_country.json') else 1)"; then
+              drought_same=true
+            fi
+          else
+            drought_same=true    # the step failed or was skipped; nothing to add
+          fi
+          rm -f prev.drought.json
+
+          paths=""
           if $png_same && $meta_same; then
-            echo "SST data unchanged (only generated_at differs); nothing to commit."
+            echo "SST data unchanged (only generated_at differs)."
             git checkout -- archive 2>/dev/null || true   # drop the timestamp churn
             git clean -fd archive 2>/dev/null || true
           else
-            git add sst_anomaly.png sst_anomaly.meta.json archive
-            git commit -m "Refresh SST anomaly ($(date -u +%Y-%m-%d))"
+            paths="$paths sst_anomaly.png sst_anomaly.meta.json archive"
+          fi
+
+          if $drought_same; then
+            echo "Drought layers unchanged."
+            git checkout -- drought_country.json 2>/dev/null || true
+          else
+            paths="$paths drought_country.json"
+          fi
+
+          if [ -z "$paths" ]; then
+            echo "Nothing to commit."
+          else
+            git add $paths
+            git commit -m "Refresh climate data ($(date -u +%Y-%m-%d))"
             git push
           fi

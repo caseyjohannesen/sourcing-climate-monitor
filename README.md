@@ -100,7 +100,8 @@ rather than displaying something stale.
 Clicking a country flies the view to it — rotating and dollying the globe, or
 panning and zooming the flat map — loads that country's admin-1 district
 boundaries, and shows its **area-averaged** air temperature, precipitation and
-soil moisture. Clicking again inside a district drills down to that district's
+soil moisture, plus four per-country drought indicators (below). Clicking again
+inside a district drills down to that district's
 own average. Esc steps back out one level at a time (district → country → world),
 as does the back link in the panel; dragging or scrolling takes over at any point.
 
@@ -116,6 +117,56 @@ This is a 25-point sample of a weather model, not an areal integral — dense fo
 Ghana, coarse for Russia — so the panel always states the point count rather than
 letting "average" imply more than it is. Results are cached per country and per
 district, and requests are strictly click-driven.
+
+#### Drought indicators
+
+Below the Open-Meteo rows the country panel shows four per-country drought
+figures, precomputed by `extract_drought_layers.py` into `drought_country.json`
+(~11 KB, one row per country) as part of the daily job:
+
+| Row | Product | Scale |
+|---|---|---|
+| SPI (3-month) | ERA5-Land, NIDIS `ce-GLOBAL-ERA5_LAND_DAILY-spi-90d` | standardized, ≈ ±3 |
+| SPI (9-month) | ERA5-Land, NIDIS `…-spi-270d` | standardized, ≈ ±3 |
+| SPEI (3-month) | ERA5-Land, NIDIS `…-speih-90d` | standardized, ≈ ±3 |
+| Vegetation health | NOAA STAR Blended-VHP 4 km | 0–100 |
+
+Nothing about them touches the globe: they are values in the panel only, so the
+default view is byte-identical to before this feature. There is no district-level
+equivalent, so drilling into a district keeps the section but retitles it
+`<Country> · national` — the context is worth having, and the heading stops the
+figure being read as that district's own.
+
+The products do not share a cadence: 90-day SPI lands daily, 270-day SPI can sit
+for weeks, vegetation health is weekly. Each layer therefore carries the
+`Last-Modified` date of the file it came from, and any row older than 10 days is
+marked `· Nd old` in the panel rather than being presented as current beside the
+fresh ones.
+
+Three of the four are not the products originally scoped, because those do not
+exist as data. drought.gov's bucket publishes GeoTIFFs for exactly one family,
+the `ce-` (Climate Engine) products; everything else in it — the GPCC 9-month
+index, the NOAA VHI layer, the SPoRT-LiS soil moisture layer — ships only as
+pre-rendered XYZ PNG tiles, which are styled images with no recoverable values.
+So the 9-month SPI comes from ERA5's 270-day rather than GPCC (whose tiles also
+stopped updating 2025-12-31), vegetation health is pulled from NOAA STAR
+directly, which is the upstream source drought.gov renders, and soil moisture is
+replaced by SPEI — SPoRT-LiS is CONUS-only, so per-country global values are not
+possible from it at all, and no global soil-moisture raster exists in the bucket.
+
+The zonal means read each global raster **once** and mask countries out of it in
+memory, rather than issuing a windowed read per country. That is the opposite of
+the OISST pattern and deliberately so: OPeNDAP windowing wins because it slices a
+multi-decade archive, whereas each of these is a single global snapshot small
+enough that 177 windowed reads just pay 177 round-trips and re-fetch overlapping
+tiles — measured, 16.8 s windowed against 2.4 s for one whole read. The STAR file
+settles it regardless, being stripe-organised rather than tiled.
+
+SPI and SPEI are diverging about zero, vegetation health is a bounded 0–100, and
+the panel renders the two kinds differently rather than as one bar style: the
+standardized indices grow left (dry) or right (wet) from a centre tick so sign
+reads as direction, while VHI is a left-anchored fill banded on its own
+thresholds — stressed below 40, favourable above 60, neither in between.
 
 Note these files are fetched with `cache: 'default'`, deliberately not
 `force-cache`: the latter returns a cached match *fresh or stale* and never
@@ -199,9 +250,13 @@ the flat map was added.
 ## Running locally
 
 ```bash
-pip install xarray netCDF4 pandas numpy requests pillow
+pip install xarray netCDF4 pandas numpy requests pillow rasterio
 python extract_sst_anomaly.py --out sst_anomaly.png
+python extract_drought_layers.py          # optional; writes drought_country.json
 ```
+
+`rasterio` is only needed for the drought layers. Without
+`drought_country.json` the panel simply omits that section.
 
 Then serve the folder (a plain file open won't allow the `fetch`, so use a
 server) and visit it:

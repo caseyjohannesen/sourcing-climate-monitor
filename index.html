@@ -102,6 +102,28 @@
   .country-panel .cp-note{margin-top:10px;font-size:10px;color:var(--muted);line-height:1.4;}
   .country-panel .cp-districts{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);font-size:11px;color:var(--muted);}
 
+  /* Drought indicators. Country-level only -- the values are national means, so
+     the section is not rendered when a district is selected. */
+  .cp-drought{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);}
+  .cp-drought .cp-sec{font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:7px;}
+  .cp-drought .dr{margin-bottom:9px;}
+  .cp-drought .dr-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12px;margin-bottom:4px;}
+  .cp-drought .dr-k{color:var(--muted);}
+  .cp-drought .dr-v{color:var(--paper);font-family:'Fraunces',serif;white-space:nowrap;}
+  /* Track is the full scale; the fill's meaning differs by scale type, so the
+     two get different geometry rather than different colours of the same bar. */
+  .cp-drought .dr-track{position:relative;height:4px;background:var(--panel-2);border-radius:2px;overflow:hidden;}
+  .cp-drought .dr-fill{position:absolute;top:0;bottom:0;border-radius:2px;}
+  /* Diverging (SPI/SPEI): zero sits at the midpoint and the fill grows out from
+     it, so sign reads as direction rather than only as a minus glyph. */
+  .cp-drought .dr-zero{position:absolute;top:-1px;bottom:-1px;left:50%;width:1px;background:var(--line);}
+  .cp-drought .dr-dry{background:#C9763F;}
+  .cp-drought .dr-wet{background:#4E9AA6;}
+  .cp-drought .dr-mid{background:var(--gold-dim);}
+  .cp-drought .dr-na{color:var(--muted);font-family:'IBM Plex Sans',sans-serif;}
+  .cp-drought .dr-scale{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-top:3px;opacity:0.75;}
+  .cp-drought .dr-age{color:var(--gold-dim);font-size:10px;}
+
   .region-panel{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:360px;max-width:calc(100% - 40px);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,0.35);}
   .region-panel.hidden{display:none;}
   .region-panel .rp-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
@@ -157,6 +179,7 @@
         <button class="cp-close" id="cpClose" aria-label="Close">×</button>
       </div>
       <div id="cpBody"></div>
+      <div id="cpDrought"></div>
       <div class="cp-districts" id="cpDistricts"></div>
     </div>
     <div class="region-panel hidden" id="regionPanel">
@@ -1480,8 +1503,102 @@ function averageConditions(results, pts){
 function fmt(v, unit){ return (v == null || Number.isNaN(v)) ? '—' : (Math.round(v*100)/100 + unit); }
 function cpRow(k, v){ return '<div class="cp-row"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>'; }
 
+// ---- drought indicators -------------------------------------------------
+// Per-country SPI/SPEI/VHI, precomputed server-side by extract_drought_layers.py
+// (see its header for why these four products). Values only: nothing here
+// touches the globe, so the default view is unchanged by this feature.
+let droughtData = null;
+
+function loadDroughtData(){
+  // Optional. The file may legitimately not exist yet on a fresh checkout that
+  // has not run the daily job, and the panel simply omits the section then.
+  fetch('./drought_country.json', {cache: 'default'})
+    .then(r => r.ok ? r.json() : null)
+    .then(j => { droughtData = j; })
+    .catch(() => { droughtData = null; });
+}
+
+// Full width of the diverging scale, in index units either side of zero. SPI and
+// SPEI are theoretically unbounded but ±3 covers the conventional "extreme"
+// categories, so the bar clamps there rather than rescaling per country.
+const SPI_CLAMP = 3;
+
+// Days since a layer's source file was published, or null if it did not say.
+function layerAgeDays(layer){
+  if(!layer.updated) return null;
+  const then = Date.parse(layer.updated + 'T00:00:00Z');
+  if(Number.isNaN(then)) return null;
+  return Math.floor((Date.now() - then) / 86400000);
+}
+
+// These products do not share a cadence -- 90-day SPI lands daily, 270-day SPI
+// can sit for weeks, vegetation health is weekly -- so a row that has gone stale
+// says so rather than being presented as current alongside the others. Quiet
+// below the threshold, since most rows are fresh most days.
+const STALE_AFTER_DAYS = 10;
+
+function droughtRow(layer, value){
+  const age = layerAgeDays(layer);
+  const label = layer.label
+    + (age != null && age > STALE_AFTER_DAYS ? '<span class="dr-age"> · ' + age + 'd old</span>' : '');
+  if(value == null){
+    return '<div class="dr"><div class="dr-top"><span class="dr-k">' + label
+         + '</span><span class="dr-v dr-na">—</span></div></div>';
+  }
+  let bar, scale;
+  if(layer.kind === 'pct'){
+    // 0-100: a plain left-anchored fill, banded on the product's own thresholds
+    // -- stressed below 40, favourable above 60, and neither in between, which
+    // is where a lot of countries sit and should not be coloured as healthy.
+    const pct = Math.max(0, Math.min(100, value));
+    const band = pct < 40 ? 'dr-dry' : (pct > 60 ? 'dr-wet' : 'dr-mid');
+    bar = '<div class="dr-fill ' + band
+        + '" style="left:0;width:' + pct.toFixed(1) + '%"></div>';
+    scale = '<div class="dr-scale"><span>0</span><span>100</span></div>';
+  } else {
+    // Diverging: grow from the centre, left for dry and right for wet.
+    const mag = Math.min(Math.abs(value), SPI_CLAMP) / SPI_CLAMP * 50;
+    bar = '<div class="dr-zero"></div><div class="dr-fill ' + (value < 0 ? 'dr-dry' : 'dr-wet')
+        + '" style="' + (value < 0 ? 'right:50%;' : 'left:50%;') + 'width:' + mag.toFixed(1) + '%"></div>';
+    scale = '<div class="dr-scale"><span>−3 dry</span><span>wet +3</span></div>';
+  }
+  const shown = layer.kind === 'pct' ? value.toFixed(1) : signed(value);
+  return '<div class="dr"><div class="dr-top"><span class="dr-k">' + label
+       + '</span><span class="dr-v">' + shown + '</span></div>'
+       + '<div class="dr-track">' + bar + '</div>' + scale + '</div>';
+}
+
+// These are national means and there is no district-level equivalent, so at
+// district level the section is still shown -- the context is useful when you
+// have drilled in -- but the heading names the country and says "national", so
+// the number cannot be read as the district's own.
+function renderDrought(iso, countryLabel){
+  const el = document.getElementById('cpDrought');
+  if(!el) return;
+  el.innerHTML = '';
+  if(!iso || !droughtData) return;
+  const row = (droughtData.countries || {})[iso];
+  if(!row) return;
+
+  // Failed layers are kept rather than dropped: a row reading "—" says the
+  // indicator exists but is unavailable today, where a vanished row would
+  // silently look like it was never part of the panel.
+  const layers = droughtData.layers || [];
+  if(!layers.length) return;
+
+  const heading = countryLabel
+    ? countryLabel + ' · national'
+    : 'Drought indicators';
+  const week = (layers.find(l => l.week) || {}).week;
+  el.innerHTML = '<div class="cp-drought"><div class="cp-sec">' + heading + '</div>'
+    + layers.map(l => droughtRow(l, l.status === 'ok' && row[l.id] != null ? row[l.id] : null)).join('')
+    + '<div class="cp-note">Area-weighted national means. SPI/SPEI: ERA5-Land via NIDIS'
+    + '; vegetation health: NOAA STAR' + (week ? ', ' + week.replace('week', ' week ') : '')
+    + '.</div></div>';
+}
+
 // Shared by the country and district panels: sample, fetch, average, render.
-function showConditions(key, label, polys, bbox, backLabel){
+function showConditions(key, label, polys, bbox, backLabel, iso){
   const panel = document.getElementById('countryPanel');
   const body = document.getElementById('cpBody');
   document.getElementById('cpName').textContent = label;
@@ -1490,6 +1607,11 @@ function showConditions(key, label, polys, bbox, backLabel){
   const back = document.getElementById('cpBack');
   back.textContent = backLabel ? '← ' + backLabel : '';
   back.classList.toggle('hidden', !backLabel);
+
+  // Local data, so it paints immediately rather than waiting on Open-Meteo, and
+  // it lives outside cpBody so the async conditions render cannot clobber it.
+  // backLabel is set only at district level, where it is the country's name.
+  renderDrought(iso, backLabel);
 
   const pts = samplePointsIn(polys, bbox, SAMPLE_BUDGET);
   if(!pts.length){
@@ -1526,7 +1648,7 @@ function renderConditions(a, requested){
 function openCountryPanel(c){
   selectedDistrict = null;
   updateDistrictHighlight();
-  showConditions('country:' + (c.adm0 || c.name), c.admin || c.name, c.polys, c.bbox, null);
+  showConditions('country:' + (c.adm0 || c.name), c.admin || c.name, c.polys, c.bbox, null, c.adm0);
 }
 
 function selectDistrict(d, c){
@@ -1534,7 +1656,8 @@ function selectDistrict(d, c){
   updateDistrictHighlight();
   const name = d.name || 'District';
   showConditions('district:' + (c.adm0 || c.name) + ':' + name,
-                 name + (d.type ? ' · ' + d.type : ''), d.polys, d.bbox, c.admin || c.name);
+                 name + (d.type ? ' · ' + d.type : ''), d.polys, d.bbox,
+                 c.admin || c.name, c.adm0);
 }
 
 // Outline whichever district is selected, in gold, through the same morph
@@ -1878,6 +2001,7 @@ function initScene(){
   buildLegend();
   loadCountries();
   loadAdminIndex();
+  loadDroughtData();
   document.getElementById('cpClose').addEventListener('click', exitToWorld);
   document.getElementById('cpBack').addEventListener('click', () => {
     if(focusedCountry) openCountryPanel(focusedCountry);
