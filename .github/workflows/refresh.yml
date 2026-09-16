@@ -98,6 +98,20 @@ jobs:
                && python -c "import json,sys; s=lambda p:{k:v for k,v in json.load(open(p)).items() if k!='generated_at'}; sys.exit(0 if s('prev.drought.json')==s('drought_country.json') else 1)"; then
               drought_same=true
             fi
+            # The overlay grids are judged on their PNGs alone. Their sidecars
+            # carry a generated_at that moves every run, whereas the encoder is
+            # deterministic, so the image is the honest signal for whether the
+            # underlying product actually changed. The layers refresh on quite
+            # different cadences -- 90-day SPI daily, 270-day SPI every few
+            # weeks, vegetation health weekly -- so most days only some move.
+            for png in layers/*.png; do
+              [ -f "$png" ] || continue
+              if ! { git cat-file -e "HEAD:$png" 2>/dev/null \
+                     && git show "HEAD:$png" | cmp -s - "$png"; }; then
+                drought_same=false
+                echo "changed: $png"
+              fi
+            done
           else
             drought_same=true    # the step failed or was skipped; nothing to add
           fi
@@ -114,9 +128,10 @@ jobs:
 
           if $drought_same; then
             echo "Drought layers unchanged."
-            git checkout -- drought_country.json 2>/dev/null || true
+            git checkout -- drought_country.json layers 2>/dev/null || true
+            git clean -fd layers 2>/dev/null || true
           else
-            paths="$paths drought_country.json"
+            paths="$paths drought_country.json layers"
           fi
 
           if [ -z "$paths" ]; then

@@ -30,6 +30,16 @@
   .refresh button{background:var(--panel-2);border:1px solid var(--line);color:var(--paper);padding:6px 12px;border-radius:5px;font-size:12px;cursor:pointer;font-family:inherit;}
   .refresh button:hover{border-color:var(--gold);}
 
+  /* Overlay switcher. A segmented control rather than a <select>: there are
+     only five layers and which one is live should be readable at a glance. */
+  .layer-switch{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden;}
+  .layer-switch button{background:var(--panel);border:none;border-right:1px solid var(--line);
+    color:var(--muted);padding:6px 10px;font-size:11px;border-radius:0;white-space:nowrap;}
+  .layer-switch button:last-child{border-right:none;}
+  .layer-switch button:hover{color:var(--paper);background:var(--panel-2);}
+  .layer-switch button.active{background:var(--gold-dim);color:var(--ink);font-weight:600;}
+  .layer-switch button.active:hover{background:var(--gold);color:var(--ink);}
+
   .enso-strip{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 18px;display:flex;align-items:center;gap:28px;flex-wrap:wrap;}
   .enso-metric{display:flex;flex-direction:column;gap:2px;}
   .enso-metric .label{font-size:11px;color:var(--muted);}
@@ -147,10 +157,11 @@
     <div class="title-row">
       <div>
         <h1>Sourcing Climate Monitor</h1>
-        <div class="sub">v0 prototype — sea surface temperature anomaly overlay</div>
+        <div class="sub">v0 prototype — sea surface temperature, drought and vegetation overlays</div>
       </div>
       <div class="refresh">
         <span id="lastUpdated">—</span>
+        <div class="layer-switch" id="layerSwitch"></div>
         <button id="projBtn">Flat map</button>
         <button id="regionBtn">Draw region</button>
         <button id="loadBtn">Load data files</button>
@@ -184,7 +195,7 @@
     </div>
     <div class="region-panel hidden" id="regionPanel">
       <div class="rp-head">
-        <span class="rp-title">Region average · SST anomaly</span>
+        <span class="rp-title" id="rpTitle">Region average · SST anomaly</span>
         <button class="rp-close" id="rpClose" aria-label="Close">×</button>
       </div>
       <div class="rp-hint">Right-click the map to drop pins. Edges follow great-circle arcs.
@@ -204,11 +215,11 @@
       <span class="tl-res" id="tlRes"></span>
       <button class="tl-live hidden" id="tlLive">Live</button>
     </div>
-    <div class="map-caption">Sea surface temperature anomaly · <span class="status" id="dataSource">no data loaded</span></div>
+    <div class="map-caption"><span id="captionLayer">Sea surface temperature anomaly</span> · <span class="status" id="dataSource">no data loaded</span></div>
     <div class="legend">
-      <div class="title">SST anomaly (°C)</div>
+      <div class="title" id="legendTitle">SST anomaly (°C)</div>
       <div class="bar" id="legendBar"></div>
-      <div class="ticks"><span>-5</span><span>-3</span><span>-1</span><span>0</span><span>+1</span><span>+3</span><span>+5</span></div>
+      <div class="ticks" id="legendTicks"></div>
     </div>
     <div class="uploader" id="uploader">
       <div class="uploader-inner">
@@ -250,16 +261,116 @@ const ANOMALY_BANDS = [
   { upto:  5.0, rgb: [140,  16,   0] },  // +4..+5 dark red
 ];
 const ANOMALY_OVER = [13, 0, 0];         // > +5   extreme warm cap
-function anomalyRGB(v){
-  for(const b of ANOMALY_BANDS){ if(v < b.upto) return b.rgb; }
-  return ANOMALY_OVER;
+
+// Diverging brown->blue, the conventional SPI/SPEI palette (ColorBrewer BrBG):
+// dry is brown, wet is blue-green, near-normal is near-white. Bands are the
+// standard drought classes -- +/-1 moderate, +/-1.5 severe, +/-2 extreme -- so
+// the colour break lines up with the category a value would be reported in.
+const SPI_BANDS = [
+  { upto: -2.0, rgb: [ 84,  48,   5] },  // extreme drought
+  { upto: -1.5, rgb: [140,  81,  10] },  // severe
+  { upto: -1.0, rgb: [191, 129,  45] },  // moderate
+  { upto: -0.5, rgb: [223, 194, 125] },  // mild
+  { upto:  0.5, rgb: [242, 240, 235] },  // near normal
+  { upto:  1.0, rgb: [174, 216, 209] },  // mildly wet
+  { upto:  1.5, rgb: [ 90, 180, 172] },  // moderately wet
+  { upto:  2.0, rgb: [ 26, 136, 128] },  // very wet
+];
+const SPI_OVER = [0, 78, 71];            // >= +2 extremely wet
+
+// Vegetation Health Index, 0-100. Red is stressed, green is vigorous, with the
+// break at 40 that the product's own documentation uses for "stressed".
+const VHI_BANDS = [
+  { upto: 10,  rgb: [165,   0,  38] },
+  { upto: 20,  rgb: [215,  48,  39] },
+  { upto: 30,  rgb: [244, 109,  67] },
+  { upto: 40,  rgb: [253, 174,  97] },
+  { upto: 50,  rgb: [254, 224, 144] },
+  { upto: 60,  rgb: [217, 239, 139] },
+  { upto: 70,  rgb: [166, 217, 106] },
+  { upto: 80,  rgb: [102, 189,  99] },
+  { upto: 90,  rgb: [ 26, 152,  80] },
+];
+const VHI_OVER = [0, 104, 55];
+
+function rampRGB(layer, v){
+  for(const b of layer.bands){ if(v < b.upto) return b.rgb; }
+  return layer.over;
 }
 
-// Render the legend strip from the same band list, so palette and key never drift.
+// ================= overlay layers =================
+// One registry entry per selectable overlay. Everything that used to be
+// hardcoded as "SST anomaly" lives here instead: the palette, the no-data
+// colour, how a value is formatted, what the legend says, and what a cell is
+// called when the region tool counts them.
+//
+// `nodata` is the point of this whole structure. SST is ocean data with land
+// masked out, so its NaN cells paint the continents grey. The drought layers
+// are the exact inverse -- land is data, ocean is NaN -- so the identical
+// mask mechanism has to paint the sea instead. Nothing structural changes:
+// NaN is NaN throughout decoding, sampling and averaging, and only the colour
+// it is drawn in depends on which side of the coastline carries the data.
+const LAND_GREY = [124, 122, 112];
+const OCEAN_INK = [ 21,  52,  58];
+
+const SPI_TICKS = ['-2','-1.5','-1','-0.5','0','+0.5','+1','+1.5','+2'];
+const fmtSigned = v => signed(v);
+const fmtPlain  = v => v.toFixed(1);
+
+const OVERLAYS = [
+  {
+    id: 'sst', label: 'SST', meta: './sst_anomaly.meta.json',
+    caption: 'Sea surface temperature anomaly',
+    legend: 'SST anomaly (°C)', ticks: ['-5','-3','-1','0','+1','+3','+5'],
+    bands: ANOMALY_BANDS, over: ANOMALY_OVER, nodata: LAND_GREY,
+    unit: ' °C', fmt: fmtSigned, valueLabel: 'mean anomaly', cellNoun: 'ocean cells',
+    archive: true,      // only SST has a frame archive, so only it gets the timeline
+  },
+  {
+    id: 'spi3', label: 'SPI-3', meta: './layers/spi3.meta.json',
+    caption: '3-month Standardized Precipitation Index',
+    legend: 'SPI, 3-month', ticks: SPI_TICKS,
+    bands: SPI_BANDS, over: SPI_OVER, nodata: OCEAN_INK,
+    unit: '', fmt: fmtSigned, valueLabel: 'mean SPI', cellNoun: 'land cells',
+  },
+  {
+    id: 'spi9', label: 'SPI-9', meta: './layers/spi9.meta.json',
+    caption: '9-month Standardized Precipitation Index',
+    legend: 'SPI, 9-month', ticks: SPI_TICKS,
+    bands: SPI_BANDS, over: SPI_OVER, nodata: OCEAN_INK,
+    unit: '', fmt: fmtSigned, valueLabel: 'mean SPI', cellNoun: 'land cells',
+  },
+  {
+    id: 'spei3', label: 'SPEI-3', meta: './layers/spei3.meta.json',
+    caption: '3-month Standardized Precipitation-Evapotranspiration Index',
+    legend: 'SPEI, 3-month', ticks: SPI_TICKS,
+    bands: SPI_BANDS, over: SPI_OVER, nodata: OCEAN_INK,
+    unit: '', fmt: fmtSigned, valueLabel: 'mean SPEI', cellNoun: 'land cells',
+  },
+  {
+    id: 'vhi', label: 'Veg. health', meta: './layers/vhi.meta.json',
+    caption: 'Vegetation Health Index',
+    legend: 'VHI (0–100)', ticks: ['0','20','40','60','80','100'],
+    bands: VHI_BANDS, over: VHI_OVER, nodata: OCEAN_INK,
+    unit: '', fmt: fmtPlain, valueLabel: 'mean VHI', cellNoun: 'land cells',
+  },
+];
+
+const layerById = id => OVERLAYS.find(l => l.id === id) || OVERLAYS[0];
+let activeLayer = OVERLAYS[0];
+
+// Render the legend strip from the active layer's band list, so palette and key
+// never drift.
 function buildLegend(){
   const bar = document.getElementById('legendBar');
-  const colors = [...ANOMALY_BANDS.map(b => b.rgb), ANOMALY_OVER];
+  const colors = [...activeLayer.bands.map(b => b.rgb), activeLayer.over];
   bar.innerHTML = colors.map(c => `<span style="background:rgb(${c[0]},${c[1]},${c[2]})"></span>`).join('');
+  document.getElementById('legendTitle').textContent = activeLayer.legend;
+  document.getElementById('legendTicks').innerHTML =
+    activeLayer.ticks.map(t => `<span>${t}</span>`).join('');
+  document.getElementById('captionLayer').textContent = activeLayer.caption;
+  const rpTitle = document.getElementById('rpTitle');
+  if(rpTitle) rpTitle.textContent = 'Region average · ' + activeLayer.legend;
 }
 
 // ================= anomaly grid =================
@@ -361,11 +472,14 @@ function buildAnomalyCanvas(grid){
   const img = ctx.createImageData(w, h);
   // grid row 0 is already north, matching both the canvas and the sphere's UV
   // convention, so unlike the old JSON path there is no flip here.
+  // The no-data colour is the layer's, not a constant: for SST these cells are
+  // land, for the drought layers they are ocean. See the OVERLAYS registry.
+  const layer = activeLayer, nd = layer.nodata;
   for(let i=0, n=w*h; i<n; i++){
     const v = grid.values[i];
     let r,g,b;
-    if(Number.isNaN(v)){ r=124; g=122; b=112; }
-    else { const c = anomalyRGB(v); r=c[0]; g=c[1]; b=c[2]; }
+    if(Number.isNaN(v)){ r=nd[0]; g=nd[1]; b=nd[2]; }
+    else { const c = rampRGB(layer, v); r=c[0]; g=c[1]; b=c[2]; }
     const idx = i * 4;
     img.data[idx]=r; img.data[idx+1]=g; img.data[idx+2]=b; img.data[idx+3]=255;
   }
@@ -1021,14 +1135,17 @@ function updatePolygonStats(){
   }
   const r = polyResult || {};
   if(r.error){ el.innerHTML = `<span class="rp-msg">${r.error}</span>`; return; }
+  // Everything layer-specific here comes from the registry, so the region tool
+  // reports whichever overlay is displayed rather than SST specifically.
+  const L = activeLayer;
   if(!r.count){
-    el.innerHTML = `<span class="rp-msg">No ocean cells inside this region (all land / no data) — `
+    el.innerHTML = `<span class="rp-msg">No ${L.cellNoun} inside this region (no data) — `
                  + `${fmtArea(r.areaKm2)}.</span>`;
     return;
   }
   el.innerHTML =
-    `<div class="rp-mean">${signed(r.mean)} °C<span class="rp-mean-lbl"> mean anomaly</span></div>` +
-    `<div class="rp-sub">min ${signed(r.min)} · max ${signed(r.max)} · ${r.count.toLocaleString()} ocean cells (area-weighted)</div>` +
+    `<div class="rp-mean">${L.fmt(r.mean)}${L.unit}<span class="rp-mean-lbl"> ${L.valueLabel}</span></div>` +
+    `<div class="rp-sub">min ${L.fmt(r.min)} · max ${L.fmt(r.max)} · ${r.count.toLocaleString()} ${L.cellNoun} (area-weighted)</div>` +
     `<div class="rp-sub">${n} pins · ${fmtArea(r.areaKm2)} enclosed</div>`;
 }
 
@@ -1261,7 +1378,10 @@ function setupTimeline(){
   slider.min = 0;
   slider.max = archiveIndex.frames.length - 1;
   slider.value = archiveIndex.frames.length - 1;
-  bar.classList.remove('hidden');
+  // The archive loads asynchronously, so it can land after the user has already
+  // switched to a drought layer. Revealing the timeline unconditionally here
+  // would put a scrubber under a layer that has no frames behind it.
+  if(activeLayer.archive) bar.classList.remove('hidden');
   framePos = archiveIndex.frames.length - 1;
   updateTimelineUI(archiveIndex.frames[framePos].date, framePos);
   setSparklineMarker(archiveIndex.frames[framePos].date);
@@ -1998,6 +2118,7 @@ function initScene(){
     document.getElementById('fileInput').click();
   });
 
+  buildLayerSwitch();
   buildLegend();
   loadCountries();
   loadAdminIndex();
@@ -2052,7 +2173,11 @@ function displayGrid(grid){
 
   document.getElementById('dataSource').textContent =
     `${grid.date || 'unknown date'} — ${grid.source || 'source unspecified'}`;
-  updateEnsoStrip(grid);
+  // The Niño 3.4 readout is an SST quantity. Recomputing it from whichever grid
+  // happens to be on screen would have it average SPI and print the answer in
+  // degrees, so it stays bound to the SST layer and keeps its last value while
+  // a drought overlay is displayed.
+  if(activeLayer.archive) updateEnsoStrip(grid);
   // a closed region's stats were computed against the previous grid; recompute
   if(polyClosed){ polyResult = averagePolygon(polyPins, ringEdges(polyPins, true)); }
   if(!document.getElementById('regionPanel').classList.contains('hidden')) updatePolygonStats();
@@ -2068,6 +2193,58 @@ function applyGrid(grid, updatedLabel){
 }
 
 function setStatus(msg){ document.getElementById('dataSource').textContent = msg; }
+
+// ---- overlay switching --------------------------------------------------
+// Each layer's decoded grid is kept once fetched, so flipping back and forth
+// costs nothing after the first visit. For SST the cached entry is whatever the
+// timeline was last parked on, which is why switching away and back returns to
+// the same day rather than snapping to live.
+const layerGrids = new Map();
+
+function buildLayerSwitch(){
+  const el = document.getElementById('layerSwitch');
+  if(!el) return;
+  el.innerHTML = OVERLAYS.map(l =>
+    `<button type="button" data-layer="${l.id}">${l.label}</button>`).join('');
+  el.querySelectorAll('button').forEach(b =>
+    b.addEventListener('click', () => selectLayer(b.dataset.layer)));
+  markLayerButtons();
+}
+
+function markLayerButtons(){
+  document.querySelectorAll('#layerSwitch button').forEach(b =>
+    b.classList.toggle('active', b.dataset.layer === activeLayer.id));
+}
+
+function selectLayer(id){
+  const layer = layerById(id);
+  if(layer.id === activeLayer.id) return;
+
+  if(currentGrid) layerGrids.set(activeLayer.id, currentGrid);
+  activeLayer = layer;
+  markLayerButtons();
+  buildLegend();
+
+  // Playback belongs to SST alone: the drought products ship a single current
+  // grid, with no frame archive behind them to scrub through.
+  stopPlayback();
+  document.getElementById('timeline').classList.toggle('hidden', !(layer.archive && archiveIndex));
+
+  const cached = layerGrids.get(layer.id);
+  if(cached){ displayGrid(cached); return; }
+
+  setStatus('loading ' + layer.label + ' …');
+  fetchGrid(layer.meta)
+    .then(grid => {
+      if(activeLayer.id !== layer.id) return;     // switched again mid-fetch
+      layerGrids.set(layer.id, grid);
+      displayGrid(grid);
+    })
+    .catch(err => {
+      if(activeLayer.id !== layer.id) return;
+      setStatus('could not load ' + layer.label + ' — ' + err.message);
+    });
+}
 
 // Fetch the sidecar first (it describes the grid and carries the decode table),
 // then the PNG it names.

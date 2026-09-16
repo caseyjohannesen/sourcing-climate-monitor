@@ -71,19 +71,145 @@ def nidis_cog(product):
     return f"{NIDIS}/ce-{product}/{product}.tif"
 
 
-# `kind` drives the panel's rendering: "index" is diverging about zero, "pct" is
-# a 0-100 bar. `valid` clips the physically meaningful range, which also discards
-# each product's nodata fill (none of them declare one in the GeoTIFF header).
+# `kind` drives rendering: "index" is diverging about zero, "pct" is a 0-100
+# scale.
+#
+# Two ranges, deliberately not one:
+#   `valid` is physical plausibility, used only to throw away each product's
+#     nodata fill (none declare one in the GeoTIFF header). It is wide on
+#     purpose -- NIDIS floors SPI at -4.00 but leaves the wet tail uncapped, and
+#     real cells reach +8.2, so a tight window here would silently drop genuine
+#     extremes out of the country means.
+#   `clip` is the display range the 8-bit overlay quantizes across. Values
+#     outside it are clamped, not dropped, and the count is recorded in the
+#     sidecar.
 LAYERS = [
-    {"id": "spi3",  "label": "SPI (3-month)",     "kind": "index", "valid": (-5, 5),
+    {"id": "spi3",  "label": "SPI (3-month)",     "kind": "index",
+     "valid": (-10, 10), "clip": (-4, 4),
      "url": nidis_cog("GLOBAL-ERA5_LAND_DAILY-spi-90d"),   "source": "ERA5-Land via NIDIS"},
-    {"id": "spi9",  "label": "SPI (9-month)",     "kind": "index", "valid": (-5, 5),
+    {"id": "spi9",  "label": "SPI (9-month)",     "kind": "index",
+     "valid": (-10, 10), "clip": (-4, 4),
      "url": nidis_cog("GLOBAL-ERA5_LAND_DAILY-spi-270d"),  "source": "ERA5-Land via NIDIS"},
-    {"id": "spei3", "label": "SPEI (3-month)",    "kind": "index", "valid": (-5, 5),
+    {"id": "spei3", "label": "SPEI (3-month)",    "kind": "index",
+     "valid": (-10, 10), "clip": (-4, 4),
      "url": nidis_cog("GLOBAL-ERA5_LAND_DAILY-speih-90d"), "source": "ERA5-Land via NIDIS"},
-    {"id": "vhi",   "label": "Vegetation health", "kind": "pct",   "valid": (0, 100),
+    {"id": "vhi",   "label": "Vegetation health", "kind": "pct",
+     "valid": (0, 100),  "clip": (0, 100),
      "url": None, "source": "NOAA STAR Blended-VHP 4km"},   # url resolved at runtime
 ]
+
+# ---------------------------------------------------------------------------
+# overlay grids
+# ---------------------------------------------------------------------------
+# The overlay PNGs are written onto OISST's exact grid rather than the rasters'
+# native one. That is worth the resample for three reasons: the drought products
+# only span 75N-75S and their cell centres sit half a cell off any pole-aligned
+# grid, so landing them here makes the polar nodata padding fall out for free;
+# the page's texture, region tool and sampling then need no per-layer geometry;
+# and at 0.1 deg native each layer is 748 KB against 131 KB here, on a repo that
+# takes a data commit every day.
+GRID_DIR = "layers"
+GRID_W, GRID_H, GRID_STEP = 1440, 720, 0.25
+NODATA_LEVEL = 0        # matches extract_sst_anomaly.py: level 0 decodes to NaN
+LEVELS = 255            # 1..255 carry data
+
+
+def grid_meta_block():
+    half = GRID_STEP / 2
+    return {
+        "width": GRID_W, "height": GRID_H,
+        "lat_max": 90 - half, "lat_min": -90 + half,
+        "lon_min": -180 + half, "lon_max": 180 - half,
+        "step_deg": GRID_STEP,
+        "row_order": "north_to_south",
+    }
+
+
+def build_lut(lo, hi):
+    """256-entry decode table. Index 0 is nodata; 1..255 span [lo, hi] linearly.
+
+    SPI and SPEI need nothing like the SST extractor's piecewise LUT: that one
+    exists to spend levels on a long sea-ice tail, whereas these are already
+    clipped by the provider and sit almost entirely within +/-3. A flat linear
+    ramp over +/-4 gives 0.0315 per level, finer than SST's 0.05 core step.
+    """
+    step = (hi - lo) / (LEVELS - 1)
+    return [None] + [round(lo + i * step, 6) for i in range(LEVELS)]
+
+
+def quantize(values, lo, hi):
+    """Float array -> uint8 levels, NaN -> NODATA_LEVEL.
+
+    Returns (levels, clipped_low, clipped_high) so the sidecar can record how
+    much real data fell outside the display range.
+    """
+    valid = np.isfinite(values)
+    v = np.clip(np.where(valid, values, lo), lo, hi)
+    levels = np.round((v - lo) / (hi - lo) * (LEVELS - 1)) + 1
+    levels = np.where(valid, levels, NODATA_LEVEL)
+    return (levels.astype(np.uint8),
+            int(np.sum(valid & (values < lo))),
+            int(np.sum(valid & (values > hi))))
+
+
+def regrid(values, src_transform, src_crs):
+    """Area-average `values` onto the canonical 0.25 deg grid."""
+    from rasterio.transform import from_origin
+    from rasterio.warp import Resampling, reproject
+
+    dst = np.full((GRID_H, GRID_W), np.nan, dtype="float32")
+    reproject(
+        source=values.astype("float32"), destination=dst,
+        src_transform=src_transform, src_crs=src_crs, src_nodata=np.nan,
+        dst_transform=from_origin(-180.0, 90.0, GRID_STEP, GRID_STEP),
+        dst_crs="EPSG:4326", dst_nodata=np.nan,
+        resampling=Resampling.average,
+    )
+    return dst
+
+
+def write_grid(layer, values, src_transform, src_crs, date, out_dir):
+    """Write <id>.png and <id>.meta.json, the same pair extract_sst_anomaly.py
+    emits, so the page's existing loader reads them with no special case."""
+    from PIL import Image
+
+    os.makedirs(out_dir, exist_ok=True)
+    lo, hi = layer["clip"]
+    dst = regrid(values, src_transform, src_crs)
+    levels, clipped_low, clipped_high = quantize(dst, lo, hi)
+
+    png_name = f"{layer['id']}.png"
+    Image.fromarray(levels, mode="L").save(
+        os.path.join(out_dir, png_name), format="PNG", optimize=True)
+
+    finite = dst[np.isfinite(dst)]
+    meta = {
+        "date": date,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": layer["source"],
+        "layer": {"id": layer["id"], "label": layer["label"], "kind": layer["kind"]},
+        "resolution_deg": GRID_STEP,
+        "grid": grid_meta_block(),
+        "encoding": {
+            "file": png_name,
+            "format": "png-l8-lut",
+            "nodata_level": NODATA_LEVEL,
+            "lut": build_lut(lo, hi),
+        },
+        "stats": {
+            "cells": int(finite.size),
+            "min": round(float(finite.min()), 4) if finite.size else None,
+            "max": round(float(finite.max()), 4) if finite.size else None,
+            "mean": round(float(finite.mean()), 4) if finite.size else None,
+            "clipped_low": clipped_low,
+            "clipped_high": clipped_high,
+        },
+    }
+    with open(os.path.join(out_dir, f"{layer['id']}.meta.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, separators=(",", ":"))
+
+    size = os.path.getsize(os.path.join(out_dir, png_name))
+    return size, meta["stats"]
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +290,7 @@ def read_whole(url, download):
     """
     if not download:
         with rasterio.open(f"/vsicurl/{url}") as ds:
-            return ds.read(1), ds.transform, ds.bounds
+            return ds.read(1), ds.transform, ds.crs
 
     tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
     try:
@@ -173,7 +299,7 @@ def read_whole(url, download):
             while chunk := resp.read(1 << 20):
                 fh.write(chunk)
         with rasterio.open(tmp.name) as ds:
-            return ds.read(1), ds.transform, ds.bounds
+            return ds.read(1), ds.transform, ds.crs
     finally:
         os.unlink(tmp.name)
 
@@ -235,6 +361,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--boundaries", default=BOUNDARIES)
+    ap.add_argument("--grids", default=GRID_DIR, help="directory for the overlay PNG/meta pairs")
     args = ap.parse_args()
 
     with open(args.boundaries, encoding="utf-8") as fh:
@@ -255,7 +382,7 @@ def main():
 
         print(f"[{layer['id']}] reading {url.rsplit('/', 1)[-1]} ...", flush=True)
         try:
-            arr, transform, _ = read_whole(url, download)
+            arr, transform, crs = read_whole(url, download)
         except Exception as exc:
             # One bad layer should not cost the other three: the panel already
             # renders a row as unavailable when its value is missing.
@@ -264,7 +391,11 @@ def main():
                                "status": "unavailable", "error": str(exc)})
             continue
 
+        # Mask nodata fill once, up front, so the country means and the overlay
+        # grid are built from exactly the same values.
         lo, hi = layer["valid"]
+        arr = np.where(np.isfinite(arr) & (arr >= lo) & (arr <= hi), arr, np.nan)
+
         got = 0
         for f in features:
             iso = f["properties"][ISO_KEY]
@@ -273,6 +404,10 @@ def main():
                 countries.setdefault(iso, {})[layer["id"]] = val
                 got += 1
         print(f"  {got}/{len(features)} countries")
+
+        size, gstats = write_grid(layer, arr, transform, crs, updated, args.grids)
+        print(f"  overlay {GRID_W}x{GRID_H} -> {size/1024:.0f} KB"
+              f" (clipped {gstats['clipped_low']} low / {gstats['clipped_high']} high)")
 
         meta = {k: layer[k] for k in ("id", "label", "kind", "source")}
         meta["status"] = "ok"

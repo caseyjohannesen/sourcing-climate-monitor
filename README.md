@@ -38,6 +38,56 @@ colour bands are 0.2–1.0 °C wide, so the error sits well below anything the m
 can show. `--format json` still emits the original single-file shape for local
 inspection.
 
+### Overlay layers
+
+A segmented switcher beside the projection toggle selects which single layer the
+map draws:
+
+| Layer | Grid source | Scale | Cadence |
+|---|---|---|---|
+| SST anomaly (default) | NOAA OISST | °C, −5…+5 | daily |
+| SPI-3 | ERA5-Land via NIDIS | unitless, −4…+4 | daily |
+| SPI-9 | ERA5-Land via NIDIS | unitless, −4…+4 | every few weeks |
+| SPEI-3 | ERA5-Land via NIDIS | unitless, −4…+4 | daily |
+| Vegetation health | NOAA STAR Blended-VHP | 0–100 | weekly |
+
+The four drought grids are written by `extract_drought_layers.py` into
+`layers/<id>.png` + `layers/<id>.meta.json` — the same quantized-PNG-plus-sidecar
+pair `extract_sst_anomaly.py` emits, so the page's existing loader reads them
+with no special case. Each is 157–211 KB.
+
+**Land is the data, ocean is the hole.** That is the exact inverse of SST, and
+it needed no structural change: the no-data mask was already a reserved *level*
+decoded to NaN, and every consumer downstream — texture, sampling, region
+averaging — already skipped NaN without caring which side of the coastline it
+sat on. Only the colour those cells are painted was hardcoded, so it moved into
+the layer registry. SST paints them land-grey; the drought layers paint them
+ocean-ink.
+
+**They are resampled onto OISST's exact 0.25° grid** rather than shipped at
+their native 0.1°. Three reasons: the products only span 75°N–75°S and their
+cell centres sit half a cell off any pole-aligned grid, so landing them on the
+SST grid makes the polar no-data padding fall out for free; the texture, region
+tool and sampling then need no per-layer geometry; and at native resolution each
+layer is 748 KB against 131–211 KB here, in a repo that takes a data commit
+every day. The cost is narrow geographies — Chile's national mean moves 0.599 →
+0.444 — so the country panel keeps computing its numbers at native resolution
+and only the overlay is coarsened.
+
+**Quantization is a plain linear ramp**, not SST's piecewise LUT. That LUT
+exists to spend levels on a long sea-ice tail; SPI and SPEI have no such tail
+because NIDIS already clips them — SPEI arrives hard-limited to ±4, and SPI is
+floored at exactly −4.00 (1.6% of cells sit on the floor) while its wet tail runs
+uncapped to +8.2. A flat ramp over ±4 gives 0.0315 per level, finer than SST's
+0.05 core step, and clips 0.12% of SPI-3 and 0.26% of SPI-9 cells — all of them
+past +4, which is far beyond the "extremely wet" class that tops out at +2. The
+clipped counts are recorded in each sidecar.
+
+The Niño 3.4 readout stays bound to the SST layer rather than following the
+display, or it would average SPI and print the answer in degrees. Playback is
+SST-only too: the drought products ship a single current grid with no frame
+archive behind them, so the timeline hides on those layers.
+
 ### Playback and the Niño 3.4 trend
 
 A timeline under the map scrubs through the last 180 days; the sparkline in the
@@ -199,9 +249,17 @@ radius implies (Russia framed at 0.42 of the viewport under the analytic fit,
 ### Region selection
 
 Right-click the map to drop pins; right-click the first pin again (or press
-**Close region**) to close the ring and get the area-weighted mean SST anomaly
-inside it. Backspace undoes a pin, Esc clears. It works identically on the globe
-and the flat map, and a region drawn in one view is still there in the other.
+**Close region**) to close the ring and get the area-weighted mean **of whichever
+layer is displayed** inside it. Backspace undoes a pin, Esc clears. It works
+identically on the globe and the flat map, and a region drawn in one view is
+still there in the other.
+
+The averaging was already layer-agnostic — it walks the displayed grid and skips
+NaN — so generalizing it was a matter of moving the units, the value label and
+the word "cells" is counting into the layer registry. The same box over the West
+African cocoa belt reports 58 **ocean** cells at +0.36 °C on SST and 223 **land**
+cells at −0.43 on SPI-3, which is the mask inversion doing its job. Switching
+layers with a region open recomputes it in place.
 
 Two details make this spherical rather than planar geometry:
 
@@ -255,8 +313,17 @@ python extract_sst_anomaly.py --out sst_anomaly.png
 python extract_drought_layers.py          # optional; writes drought_country.json
 ```
 
-`rasterio` is only needed for the drought layers. Without
-`drought_country.json` the panel simply omits that section.
+`rasterio` is only needed for the drought work. `extract_drought_layers.py`
+writes both the per-country JSON and the four overlay grids in `layers/` from
+the same rasters, so they cannot drift apart. Without those files the page still
+runs: the panel omits its drought section, and a layer whose grid is missing
+reports it in the caption rather than failing the page.
+
+Soil moisture is deliberately absent from the overlays. There is no free global
+soil-moisture raster in this pipeline — SPoRT-LiS is CONUS-only — and SPEI is
+**not** a soil-moisture proxy, so it is not labelled as one. Adding real global
+soil moisture would mean a different source (ERA5-Land via the Copernicus CDS,
+which needs API registration) and is its own piece of work.
 
 Then serve the folder (a plain file open won't allow the `fetch`, so use a
 server) and visit it:
