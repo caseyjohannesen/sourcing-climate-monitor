@@ -17,7 +17,8 @@ workflow and served over GitHub Pages.
   levels back into °C).
 - **`index.html`** fetches the sidecar and then the PNG it names, decodes it into
   a `Float32Array`, and renders it onto the globe. If the fetch fails (opened
-  locally, or before the first data commit) it falls back to a manual file picker.
+  locally over `file://`, or before the first data commit) the caption line says
+  so and the page renders empty.
 - The view toggles between a **3D globe** and a flat **Equal Earth** map
   (Šavrič/Jenny/Patterson 2018), via `d3-geo`'s `geoEqualEarth`.
 - **`.github/workflows/refresh.yml`** runs the script daily at 13:00 UTC and

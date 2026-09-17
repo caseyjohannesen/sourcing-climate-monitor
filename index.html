@@ -12,98 +12,188 @@
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 
+  /* Near-space-black canvas with the map as the only lit object. Everything
+     above it is a translucent pane floating on the map rather than a filled
+     band boxing it in, so no chrome ever owns a full edge of the viewport. */
   :root{
-    --ink:#0F2A2E; --panel:#153338; --panel-2:#1C3E44; --line:#2A4E54;
-    --paper:#EDEAE1; --muted:#8FA6A8; --gold:#D9A441; --gold-dim:#B8893A;
+    --void:#06080B;
+    --panel:rgba(14,18,24,0.72);
+    --panel-2:rgba(255,255,255,0.06);
+    --line:rgba(255,255,255,0.10);
+    --line-2:rgba(255,255,255,0.22);
+    --ink:#06080B;
+    --paper:#E8EAED;
+    --muted:#8A93A0;
+    --gold:#D9A441; --gold-dim:#B8893A;
+    --blur:saturate(150%) blur(14px);
+    --shadow:0 8px 28px rgba(0,0,0,0.55);
   }
   *{box-sizing:border-box;}
-  html,body{margin:0;padding:0;background:var(--ink);color:var(--paper);font-family:'IBM Plex Sans',sans-serif;height:100%;}
-  h1,h2{font-family:'Fraunces',serif;}
+  html,body{margin:0;padding:0;background:var(--void);color:var(--paper);font-family:'IBM Plex Sans',sans-serif;height:100%;}
+  button{font-family:inherit;}
 
-  .app{display:flex;flex-direction:column;height:100vh;min-height:600px;}
+  .app{position:relative;height:100vh;min-height:600px;overflow:hidden;}
 
-  header{padding:20px 28px 16px 28px;border-bottom:1px solid var(--line);flex-shrink:0;}
-  .title-row{display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;}
-  .title-row h1{font-size:22px;font-weight:500;margin:0;color:var(--paper);}
-  .title-row .sub{color:var(--muted);font-size:13px;margin-top:4px;}
-  .refresh{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;}
-  .refresh button{background:var(--panel-2);border:1px solid var(--line);color:var(--paper);padding:6px 12px;border-radius:5px;font-size:12px;cursor:pointer;font-family:inherit;}
-  .refresh button:hover{border-color:var(--gold);}
+  /* One treatment for every floating surface. backdrop-filter is what keeps a
+     pill legible over the bright end of the anomaly ramp without needing an
+     opaque fill that would punch a hole in the map. */
+  .glass{background:var(--panel);border:1px solid var(--line);
+         -webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);
+         box-shadow:var(--shadow);}
 
-  /* Overlay switcher. A segmented control rather than a <select>: there are
-     only five layers and which one is live should be readable at a glance. */
-  .layer-switch{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden;}
-  .layer-switch button{background:var(--panel);border:none;border-right:1px solid var(--line);
-    color:var(--muted);padding:6px 10px;font-size:11px;border-radius:0;white-space:nowrap;}
-  .layer-switch button:last-child{border-right:none;}
-  .layer-switch button:hover{color:var(--paper);background:var(--panel-2);}
-  .layer-switch button.active{background:var(--gold-dim);color:var(--ink);font-weight:600;}
-  .layer-switch button.active:hover{background:var(--gold);color:var(--ink);}
-
-  .enso-strip{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 18px;display:flex;align-items:center;gap:28px;flex-wrap:wrap;}
-  .enso-metric{display:flex;flex-direction:column;gap:2px;}
-  .enso-metric .label{font-size:11px;color:var(--muted);}
-  .enso-metric .val{font-size:20px;font-family:'Fraunces',serif;color:var(--paper);}
-  .enso-metric .val.phase{color:var(--gold);}
-  .enso-note{font-size:11px;color:var(--muted);margin-left:auto;max-width:280px;line-height:1.4;}
-  .enso-spark-wrap{gap:4px;}
-  .enso-spark{display:block;width:190px;height:34px;overflow:visible;}
-  .enso-spark.hidden{display:none;}
-  .enso-spark .spark-line{fill:none;stroke:var(--gold);stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke;}
-  .enso-spark .spark-zero{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke;}
-  .enso-spark .spark-mark{stroke:var(--paper);stroke-width:1;opacity:0.45;vector-effect:non-scaling-stroke;}
-  .enso-spark .spark-dot{fill:var(--paper);}
-
-  /* playback bar: sits above the caption, clear of the legend on the right */
-  .timeline{position:absolute;bottom:52px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;
-            background:rgba(15,42,46,0.88);border:1px solid var(--line);border-radius:6px;padding:6px 12px;
-            box-shadow:0 4px 14px rgba(0,0,0,0.35);max-width:calc(100% - 40px);}
-  .timeline.hidden{display:none;}
-  .timeline button{background:var(--panel-2);border:1px solid var(--line);color:var(--paper);
-                   border-radius:4px;font-size:11px;font-family:inherit;cursor:pointer;padding:4px 9px;}
-  .timeline button:hover{border-color:var(--gold);}
-  .timeline .tl-play{min-width:30px;}
-  .timeline .tl-slider{width:300px;max-width:42vw;accent-color:var(--gold);cursor:pointer;}
-  .timeline .tl-date{font-family:'Fraunces',serif;font-size:12px;color:var(--paper);min-width:82px;text-align:right;}
-  .timeline .tl-res{font-size:10px;color:var(--muted);min-width:78px;}
-  .timeline .tl-live.hidden{display:none;}
-
-  .body{flex:1;position:relative;overflow:hidden;background:radial-gradient(ellipse at center, #123137 0%, #0B2124 100%);}
+  /* ---- the canvas ------------------------------------------------------
+     The renderer runs alpha:true, so all of this shows through it: a faint
+     glow seating the globe, then three starfield tiles at sizes that share no
+     small common factor, so their repeats never line up into a visible grid.
+     Backgrounds paint below child content, which is why the starfield lives on
+     .body itself rather than a ::before that would cover the canvas. */
+  .body{position:absolute;inset:0;overflow:hidden;
+    background-color:var(--void);
+    background-image:
+      radial-gradient(ellipse 58% 62% at 50% 50%, rgba(56,102,124,0.15), rgba(6,8,11,0) 72%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='420' height='420'%3E%3Cg fill='%23ffffff' fill-opacity='0.55'%3E%3Ccircle cx='169' cy='81' r='0.7'/%3E%3Ccircle cx='28' cy='41' r='0.8'/%3E%3Ccircle cx='52' cy='191' r='0.7'/%3E%3Ccircle cx='263' cy='113' r='0.5'/%3E%3Ccircle cx='226' cy='218' r='0.5'/%3E%3Ccircle cx='50' cy='286' r='0.7'/%3E%3Ccircle cx='293' cy='67' r='0.9'/%3E%3Ccircle cx='326' cy='325' r='0.7'/%3E%3Ccircle cx='35' cy='299' r='0.7'/%3E%3Ccircle cx='29' cy='117' r='0.5'/%3E%3Ccircle cx='72' cy='152' r='0.7'/%3E%3Ccircle cx='280' cy='64' r='0.7'/%3E%3Ccircle cx='290' cy='353' r='0.6'/%3E%3Ccircle cx='301' cy='296' r='0.8'/%3E%3C/g%3E%3C/svg%3E"),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='650' height='650'%3E%3Cg fill='%23ffffff' fill-opacity='0.75'%3E%3Ccircle cx='385' cy='103' r='0.9'/%3E%3Ccircle cx='68' cy='581' r='0.6'/%3E%3Ccircle cx='214' cy='512' r='0.9'/%3E%3Ccircle cx='441' cy='325' r='0.8'/%3E%3Ccircle cx='468' cy='374' r='0.7'/%3E%3Ccircle cx='188' cy='253' r='0.6'/%3E%3Ccircle cx='311' cy='541' r='0.8'/%3E%3Ccircle cx='355' cy='463' r='0.7'/%3E%3Ccircle cx='78' cy='124' r='0.9'/%3E%3Ccircle cx='172' cy='354' r='0.7'/%3E%3Ccircle cx='504' cy='435' r='0.6'/%3E%3Ccircle cx='83' cy='575' r='0.9'/%3E%3Ccircle cx='325' cy='352' r='0.9'/%3E%3Ccircle cx='612' cy='512' r='0.9'/%3E%3Ccircle cx='471' cy='74' r='1'/%3E%3Ccircle cx='280' cy='489' r='0.9'/%3E%3C/g%3E%3C/svg%3E"),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='910' height='910'%3E%3Cg fill='%23ffffff' fill-opacity='0.95'%3E%3Ccircle cx='70' cy='66' r='1.2'/%3E%3Ccircle cx='321' cy='666' r='1.1'/%3E%3Ccircle cx='701' cy='845' r='1.1'/%3E%3Ccircle cx='737' cy='399' r='1.3'/%3E%3Ccircle cx='359' cy='27' r='1.4'/%3E%3Ccircle cx='367' cy='176' r='1.2'/%3E%3Ccircle cx='509' cy='64' r='0.9'/%3E%3Ccircle cx='298' cy='136' r='1.2'/%3E%3Ccircle cx='411' cy='404' r='1.4'/%3E%3Ccircle cx='512' cy='86' r='0.9'/%3E%3Ccircle cx='415' cy='566' r='1'/%3E%3Ccircle cx='144' cy='842' r='1.1'/%3E%3C/g%3E%3C/svg%3E");
+    background-size:auto, 420px 420px, 650px 650px, 910px 910px;
+    background-position:center, 0 0, 90px 40px, 210px 130px;
+    background-repeat:no-repeat, repeat, repeat, repeat;}
   .body canvas{display:block;width:100%;height:100%;cursor:grab;}
   .body canvas.dragging{cursor:grabbing;}
 
-  .map-caption{position:absolute;bottom:14px;left:20px;font-size:11px;color:var(--muted);background:rgba(15,42,46,0.75);padding:6px 10px;border-radius:5px;max-width:340px;line-height:1.5;}
-  .map-caption .status{color:var(--gold);}
-  .map-hint{position:absolute;top:14px;right:20px;font-size:11px;color:var(--muted);background:rgba(15,42,46,0.7);padding:6px 10px;border-radius:5px;}
+  /* Chrome containers are click-through so a drag started in the gap between
+     two pills still rotates the globe; only the pills themselves take input. */
+  .float{position:absolute;z-index:5;pointer-events:none;}
+  .float > *{pointer-events:auto;}
 
-  /* sits clear of the caption below and the country panel above */
-  .back-btn{position:absolute;bottom:52px;left:20px;background:var(--panel);border:1px solid var(--line);color:var(--paper);padding:7px 13px;border-radius:5px;font-size:12px;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px rgba(0,0,0,0.35);}
-  .back-btn:hover{border-color:var(--gold);}
-  .back-btn.hidden{display:none;}
+  /* ---- top-left: branding, then ENSO, then the country panel ----------- */
+  .tl-stack{top:16px;left:16px;width:266px;display:flex;flex-direction:column;align-items:flex-start;
+            gap:9px;max-height:calc(100vh - 150px);}
 
-  .legend{position:absolute;bottom:14px;right:20px;background:rgba(15,42,46,0.75);padding:10px 12px;border-radius:5px;}
-  .legend .bar{display:flex;width:220px;height:10px;border-radius:3px;overflow:hidden;margin-bottom:4px;}
+  .brand{display:flex;align-items:center;gap:9px;padding:7px 14px 7px 10px;border-radius:999px;flex-shrink:0;}
+  .brand-mark{width:9px;height:9px;border-radius:50%;background:var(--gold);
+              box-shadow:0 0 10px rgba(217,164,65,0.8);flex-shrink:0;}
+  .brand-name{display:block;font-family:'Fraunces',serif;font-size:12.5px;line-height:1.25;color:var(--paper);white-space:nowrap;}
+  .brand-sub{display:block;font-size:10px;color:var(--muted);line-height:1.35;}
+  .brand-sub:empty{display:none;}
+
+  /* The pill carries the two figures worth a permanent glance; trend, the
+     sparkline and the provenance note live behind hover/click rather than
+     taking a full-width strip to say the same thing. */
+  .enso{position:relative;flex-shrink:0;}
+  .enso-pill{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:999px;
+             font-size:11.5px;color:var(--paper);cursor:pointer;white-space:nowrap;}
+  .enso-pill:hover{border-color:var(--line-2);}
+  .enso-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;}
+  .enso-dot.warm{background:#E8703A;box-shadow:0 0 8px rgba(232,112,58,0.75);}
+  .enso-dot.cool{background:#49A6D6;box-shadow:0 0 8px rgba(73,166,214,0.75);}
+  .enso-k{color:var(--muted);}
+  .enso-v{font-family:'Fraunces',serif;font-size:12.5px;}
+  .enso-sep{color:var(--line-2);}
+  .enso-phase{color:var(--gold);}
+  .enso-caret{color:var(--muted);font-size:8px;transition:transform .15s;}
+
+  /* padding-top rather than an offset is what bridges the gap to the pill, so
+     the pointer can travel into the popover without it closing underneath. */
+  .enso-pop{position:absolute;top:100%;left:0;width:262px;padding-top:7px;z-index:7;
+            opacity:0;visibility:hidden;transform:translateY(-4px);
+            transition:opacity .13s ease,transform .13s ease,visibility .13s;}
+  .enso:hover .enso-pop,
+  .enso[data-open="1"] .enso-pop{opacity:1;visibility:visible;transform:none;}
+  .enso:hover .enso-caret,
+  .enso[data-open="1"] .enso-caret{transform:rotate(180deg);}
+  .ep-inner{border-radius:10px;padding:11px 13px;}
+  .ep-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:4px 0;}
+  .ep-k{color:var(--muted);font-size:10.5px;}
+  .ep-v{font-family:'Fraunces',serif;font-size:13px;color:var(--paper);text-align:right;}
+  .ep-v.phase{color:var(--gold);}
+  /* The trend reads as a sentence ("Strengthening (+0.85 over 3 seasons)"),
+     which in a right-aligned two-column row wraps into a ragged block. */
+  .ep-row.stack{display:block;}
+  .ep-row.stack .ep-v{display:block;text-align:left;margin-top:2px;font-size:12px;}
+  .ep-spark{margin-top:7px;padding-top:8px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:5px;}
+  .ep-note{margin-top:9px;font-size:10px;color:var(--muted);line-height:1.45;}
+
+  .enso-spark{display:block;width:100%;height:34px;overflow:visible;}
+  .enso-spark.hidden{display:none;}
+  .enso-spark .spark-line{fill:none;stroke:var(--gold);stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke;}
+  .enso-spark .spark-zero{stroke:var(--line-2);stroke-width:1;vector-effect:non-scaling-stroke;}
+  .enso-spark .spark-mark{stroke:var(--paper);stroke-width:1;opacity:0.45;vector-effect:non-scaling-stroke;}
+  .enso-spark .spark-dot{fill:var(--paper);}
+
+  /* ---- top-centre: overlay segment + projection toggle ----------------- */
+  .pillbar{top:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;}
+  .seg{display:flex;align-items:center;gap:2px;padding:3px;border-radius:999px;}
+  .seg button{background:none;border:none;color:var(--muted);font-size:11px;padding:5px 11px;
+              border-radius:999px;cursor:pointer;white-space:nowrap;}
+  .seg button:hover{color:var(--paper);background:var(--panel-2);}
+  .seg button.active{background:var(--gold);color:var(--ink);font-weight:600;}
+  .pill{padding:8px 14px;border-radius:999px;font-size:11px;color:var(--paper);cursor:pointer;white-space:nowrap;}
+  .pill:hover{border-color:var(--line-2);}
+
+  /* ---- top-right: view controls --------------------------------------- */
+  .tools{top:16px;right:16px;display:flex;align-items:center;gap:6px;}
+  .icon-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+            color:var(--muted);cursor:pointer;padding:0;}
+  .icon-btn:hover{color:var(--paper);border-color:var(--line-2);}
+  .icon-btn.active{color:var(--ink);background:var(--gold);border-color:var(--gold);}
+  /* Lit while a country is focused: the reset button absorbed the old
+     "back to world view" button, and needs to advertise that it has work to do. */
+  .icon-btn.lit{color:var(--gold);border-color:rgba(217,164,65,0.55);}
+  .icon-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5;
+                stroke-linecap:round;stroke-linejoin:round;}
+
+  /* ---- bottom ---------------------------------------------------------- */
+  .timeline{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:5;
+            display:flex;align-items:center;gap:10px;border-radius:999px;padding:5px 12px 5px 5px;
+            max-width:calc(100% - 40px);}
+  .timeline.hidden{display:none;}
+  .timeline .tl-play{width:28px;height:28px;border-radius:50%;background:var(--panel-2);
+                     border:1px solid var(--line);color:var(--paper);font-size:10px;cursor:pointer;
+                     display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0;}
+  .timeline .tl-play:hover{border-color:var(--gold);color:var(--gold);}
+  .timeline .tl-slider{width:300px;max-width:40vw;accent-color:var(--gold);cursor:pointer;}
+  .timeline .tl-date{font-family:'Fraunces',serif;font-size:12px;color:var(--paper);min-width:82px;text-align:right;}
+  .timeline .tl-res{font-size:9.5px;color:var(--muted);min-width:76px;}
+  .timeline .tl-live{background:var(--panel-2);border:1px solid var(--line);color:var(--paper);
+                     border-radius:999px;font-size:10px;cursor:pointer;padding:4px 10px;}
+  .timeline .tl-live:hover{border-color:var(--gold);}
+  .timeline .tl-live.hidden{display:none;}
+
+  /* Shown on load and again whenever the projection flips, then faded out --
+     the interaction model is worth saying once, not parking permanently. */
+  .map-hint{position:absolute;bottom:64px;left:50%;transform:translateX(-50%);z-index:4;
+            font-size:10.5px;color:var(--muted);padding:5px 13px;border-radius:999px;white-space:nowrap;
+            opacity:0;visibility:hidden;transition:opacity .6s ease,visibility .6s;}
+  .map-hint.show{opacity:1;visibility:visible;transition:opacity .25s ease,visibility .25s;}
+
+  .map-caption{position:absolute;bottom:18px;left:16px;z-index:4;font-size:10.5px;color:var(--muted);
+               padding:7px 13px;border-radius:999px;max-width:min(380px,42vw);line-height:1.45;}
+  .map-caption .status{color:var(--paper);}
+  /* The only surviving trace of the old uploader: if the live fetch fails, it
+     says so here rather than throwing up a modal with a file picker. */
+  .map-caption .status.err{color:var(--gold);}
+
+  .legend{position:absolute;bottom:18px;right:16px;z-index:4;border-radius:10px;padding:9px 12px;}
+  .legend .title{font-size:9.5px;letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);margin-bottom:7px;}
+  .legend .bar{display:flex;width:200px;height:7px;border-radius:4px;overflow:hidden;margin-bottom:5px;}
   .legend .bar span{flex:1;}
-  .legend .ticks{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);width:220px;}
-  .legend .title{font-size:10px;color:var(--muted);margin-bottom:6px;}
+  .legend .ticks{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);width:200px;}
 
-  .uploader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(11,33,36,0.55);}
-  .uploader-inner{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px 26px;text-align:center;max-width:280px;}
-  .uploader-title{font-family:'Fraunces',serif;font-size:17px;margin-bottom:6px;}
-  .uploader-sub{font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.4;}
-  .uploader-btn{display:inline-block;background:var(--gold);color:var(--ink);font-size:13px;font-weight:600;padding:8px 16px;border-radius:6px;cursor:pointer;}
-  .uploader-btn input{display:none;}
-  .uploader.hidden{display:none;}
+  /* ---- panels ---------------------------------------------------------- */
+  .country-label{position:fixed;pointer-events:none;z-index:8;background:rgba(14,18,24,0.9);
+                 border:1px solid var(--line);color:var(--paper);font-size:11px;padding:3px 8px;
+                 border-radius:5px;transform:translate(12px,12px);display:none;}
 
-  .country-label{position:fixed;pointer-events:none;z-index:6;background:rgba(15,42,46,0.92);border:1px solid var(--line);color:var(--paper);font-size:11px;padding:3px 7px;border-radius:4px;transform:translate(12px,12px);display:none;}
-  .country-panel{position:absolute;top:14px;left:20px;width:248px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,0.35);}
+  /* A flex child of .tl-stack rather than absolutely placed, so it always sits
+     below the ENSO pill and scrolls instead of running off the bottom. */
+  .country-panel{width:100%;border-radius:10px;padding:13px 15px;flex:0 1 auto;min-height:0;overflow-y:auto;}
   .country-panel.hidden{display:none;}
   .country-panel .cp-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:8px;}
-  .country-panel .cp-name{font-family:'Fraunces',serif;font-size:16px;color:var(--paper);}
-  .country-panel .cp-back{display:block;background:none;border:none;color:var(--muted);font-size:11px;padding:0 0 6px 0;cursor:pointer;font-family:inherit;text-align:left;}
+  .country-panel .cp-name{font-family:'Fraunces',serif;font-size:15px;color:var(--paper);}
+  .country-panel .cp-back{display:block;background:none;border:none;color:var(--muted);font-size:11px;padding:0 0 6px 0;cursor:pointer;text-align:left;}
   .country-panel .cp-back:hover{color:var(--gold);}
   .country-panel .cp-back.hidden{display:none;}
-  .country-panel .cp-close{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;}
+  .country-panel .cp-close{background:none;border:none;color:var(--muted);font-size:17px;line-height:1;cursor:pointer;padding:0;}
   .country-panel .cp-close:hover{color:var(--gold);}
   .country-panel .cp-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid var(--line);font-size:12px;}
   .country-panel .cp-row .k{color:var(--muted);}
@@ -126,7 +216,7 @@
   .cp-drought .dr-fill{position:absolute;top:0;bottom:0;border-radius:2px;}
   /* Diverging (SPI/SPEI): zero sits at the midpoint and the fill grows out from
      it, so sign reads as direction rather than only as a minus glyph. */
-  .cp-drought .dr-zero{position:absolute;top:-1px;bottom:-1px;left:50%;width:1px;background:var(--line);}
+  .cp-drought .dr-zero{position:absolute;top:-1px;bottom:-1px;left:50%;width:1px;background:var(--line-2);}
   .cp-drought .dr-dry{background:#C9763F;}
   .cp-drought .dr-wet{background:#4E9AA6;}
   .cp-drought .dr-mid{background:var(--gold-dim);}
@@ -134,66 +224,120 @@
   .cp-drought .dr-scale{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-top:3px;opacity:0.75;}
   .cp-drought .dr-age{color:var(--gold-dim);font-size:10px;}
 
-  .region-panel{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:360px;max-width:calc(100% - 40px);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,0.35);}
+  /* Right-hand side, tucked under the view controls -- the old top-centre spot
+     now belongs to the layer pills. */
+  .region-panel{position:absolute;top:60px;right:16px;z-index:5;width:330px;max-width:calc(100% - 32px);
+                border-radius:10px;padding:12px 14px;}
   .region-panel.hidden{display:none;}
   .region-panel .rp-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
-  .region-panel .rp-title{font-family:'Fraunces',serif;font-size:15px;color:var(--paper);}
-  .region-panel .rp-close{background:none;border:none;color:var(--muted);font-size:18px;line-height:1;cursor:pointer;padding:0;}
+  .region-panel .rp-title{font-family:'Fraunces',serif;font-size:14px;color:var(--paper);}
+  .region-panel .rp-close{background:none;border:none;color:var(--muted);font-size:17px;line-height:1;cursor:pointer;padding:0;}
   .region-panel .rp-close:hover{color:var(--gold);}
-  .region-panel .rp-hint{font-size:11px;color:var(--muted);margin:2px 0 10px;line-height:1.5;}
+  .region-panel .rp-hint{font-size:10.5px;color:var(--muted);margin:2px 0 10px;line-height:1.5;}
   .region-panel .rp-actions{display:flex;gap:8px;}
   .region-panel .rp-stats{min-height:44px;}
-  .region-panel .rp-stats .rp-mean{font-family:'Fraunces',serif;font-size:22px;color:var(--gold);}
+  .region-panel .rp-stats .rp-mean{font-family:'Fraunces',serif;font-size:21px;color:var(--gold);}
   .region-panel .rp-stats .rp-mean-lbl{font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:var(--muted);}
   .region-panel .rp-stats .rp-sub{font-size:11px;color:var(--muted);margin-top:2px;}
   .region-panel .rp-stats .rp-msg{font-size:12px;color:var(--muted);}
-  .region-panel .rp-clear{margin-top:8px;background:var(--panel-2);border:1px solid var(--line);color:var(--paper);padding:5px 11px;border-radius:5px;font-size:12px;cursor:pointer;font-family:inherit;}
+  .region-panel .rp-clear{margin-top:8px;background:var(--panel-2);border:1px solid var(--line);color:var(--paper);
+                          padding:5px 12px;border-radius:999px;font-size:11px;cursor:pointer;}
   .region-panel .rp-clear:hover{border-color:var(--gold);}
+
+  /* The bottom edge carries three independent things -- caption left, timeline
+     centre, legend right -- and only a wide viewport has room for all three on
+     one row. Below that the timeline lifts onto a row of its own, clearing the
+     legend (the tallest of the three) rather than trying to squeeze between
+     them; the hint rides up with it. */
+  @media (max-width:1400px){
+    .timeline{bottom:88px;}
+    .map-hint{bottom:136px;}
+  }
+
+  /* Below ~820px the top-centre pills no longer clear the brand and the view
+     controls either side of them, so they drop to their own row, above the
+     timeline that has already moved up. */
+  @media (max-width:820px){
+    .pillbar{top:auto;bottom:140px;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 32px);}
+    .seg{flex-wrap:wrap;justify-content:center;}
+    .map-hint{display:none;}
+    .tl-stack{width:230px;max-height:calc(100vh - 290px);}
+    .region-panel{width:280px;}
+    .legend .bar,.legend .ticks{width:150px;}
+    .timeline .tl-slider{max-width:34vw;}
+  }
 </style>
 </head>
 <body>
 <div class="app">
-  <header>
-    <div class="title-row">
-      <div>
-        <h1>Sourcing Climate Monitor</h1>
-        <div class="sub">v0 prototype — sea surface temperature, drought and vegetation overlays</div>
-      </div>
-      <div class="refresh">
-        <span id="lastUpdated">—</span>
-        <div class="layer-switch" id="layerSwitch"></div>
-        <button id="projBtn">Flat map</button>
-        <button id="regionBtn">Draw region</button>
-        <button id="loadBtn">Load data files</button>
-      </div>
-    </div>
-    <div class="enso-strip">
-      <div class="enso-metric"><span class="label">Niño 3.4 SST anomaly (daily)</span><span class="val" id="ensoVal">—</span></div>
-      <div class="enso-metric"><span class="label">Phase</span><span class="val phase" id="ensoPhase">—</span></div>
-      <div class="enso-metric"><span class="label">3-month trend</span><span class="val" id="ensoTrend">—</span></div>
-      <div class="enso-metric enso-spark-wrap">
-        <span class="label" id="ensoSparkLabel">trend</span>
-        <svg class="enso-spark hidden" id="ensoSpark" width="190" height="34"
-             preserveAspectRatio="none" aria-label="Niño 3.4 trend"></svg>
-      </div>
-      <div class="enso-note" id="ensoNote">Loading…</div>
-    </div>
-  </header>
-
   <div class="body" id="mapWrap">
-    <div class="map-hint" id="mapHint">Drag to rotate · scroll to zoom · click a country for details</div>
-    <div class="country-label" id="countryLabel"></div>
-    <div class="country-panel hidden" id="countryPanel">
-      <button class="cp-back hidden" id="cpBack"></button>
-      <div class="cp-head">
-        <span class="cp-name" id="cpName">—</span>
-        <button class="cp-close" id="cpClose" aria-label="Close">×</button>
+
+    <div class="float tl-stack">
+      <div class="brand glass">
+        <span class="brand-mark"></span>
+        <span>
+          <span class="brand-name">Sourcing Climate Monitor</span>
+          <span class="brand-sub" id="lastUpdated"></span>
+        </span>
       </div>
-      <div id="cpBody"></div>
-      <div id="cpDrought"></div>
-      <div class="cp-districts" id="cpDistricts"></div>
+
+      <div class="enso" id="enso" data-open="0">
+        <button class="enso-pill glass" id="ensoPill" type="button" aria-expanded="false">
+          <span class="enso-dot" id="ensoDot"></span>
+          <span class="enso-k">Niño 3.4</span>
+          <span class="enso-v" id="ensoVal">—</span>
+          <span class="enso-sep">·</span>
+          <span class="enso-phase" id="ensoPhase">—</span>
+          <span class="enso-caret">▼</span>
+        </button>
+        <div class="enso-pop">
+          <div class="ep-inner glass">
+            <div class="ep-row"><span class="ep-k">Anomaly, daily</span><span class="ep-v" id="ensoValFull">—</span></div>
+            <div class="ep-row"><span class="ep-k">Phase</span><span class="ep-v phase" id="ensoPhaseFull">—</span></div>
+            <div class="ep-row stack"><span class="ep-k">3-month trend</span><span class="ep-v" id="ensoTrend">—</span></div>
+            <div class="ep-spark">
+              <span class="ep-k" id="ensoSparkLabel">trend</span>
+              <svg class="enso-spark hidden" id="ensoSpark" width="190" height="34"
+                   preserveAspectRatio="none" aria-label="Niño 3.4 trend"></svg>
+            </div>
+            <div class="ep-note" id="ensoNote">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="country-panel glass hidden" id="countryPanel">
+        <button class="cp-back hidden" id="cpBack"></button>
+        <div class="cp-head">
+          <span class="cp-name" id="cpName">—</span>
+          <button class="cp-close" id="cpClose" aria-label="Close">×</button>
+        </div>
+        <div id="cpBody"></div>
+        <div id="cpDrought"></div>
+        <div class="cp-districts" id="cpDistricts"></div>
+      </div>
     </div>
-    <div class="region-panel hidden" id="regionPanel">
+
+    <div class="float pillbar">
+      <div class="seg glass" id="layerSwitch"></div>
+      <button class="pill glass" id="projBtn" type="button">Flat map</button>
+    </div>
+
+    <div class="float tools">
+      <button class="icon-btn glass" id="zoomIn" type="button" title="Zoom in" aria-label="Zoom in">
+        <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6"/><path d="M10.4 10.4 14.2 14.2M7 5.1v3.8M5.1 7h3.8"/></svg>
+      </button>
+      <button class="icon-btn glass" id="zoomOut" type="button" title="Zoom out" aria-label="Zoom out">
+        <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.6"/><path d="M10.4 10.4 14.2 14.2M5.1 7h3.8"/></svg>
+      </button>
+      <button class="icon-btn glass" id="resetBtn" type="button" title="Reset view" aria-label="Reset view">
+        <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.3"/><path d="M8 1.2v2.2M8 12.6v2.2M1.2 8h2.2M12.6 8h2.2"/></svg>
+      </button>
+      <button class="icon-btn glass" id="regionBtn" type="button" title="Draw region" aria-label="Draw region">
+        <svg viewBox="0 0 16 16"><path d="M8 2.6 13.1 6.3 11.1 12.3H4.9L2.9 6.3Z"/><circle cx="8" cy="2.6" r="1.2" fill="currentColor" stroke="none"/><circle cx="13.1" cy="6.3" r="1.2" fill="currentColor" stroke="none"/><circle cx="2.9" cy="6.3" r="1.2" fill="currentColor" stroke="none"/></svg>
+      </button>
+    </div>
+
+    <div class="region-panel glass hidden" id="regionPanel">
       <div class="rp-head">
         <span class="rp-title" id="rpTitle">Region average · SST anomaly</span>
         <button class="rp-close" id="rpClose" aria-label="Close">×</button>
@@ -207,26 +351,25 @@
         <button class="rp-clear" id="rpClear">Clear</button>
       </div>
     </div>
-    <button class="back-btn hidden" id="backBtn">← Back to world view</button>
-    <div class="timeline hidden" id="timeline">
+
+    <div class="country-label" id="countryLabel"></div>
+
+    <div class="map-hint glass" id="mapHint">Drag to rotate · scroll to zoom · click a country for details</div>
+
+    <div class="timeline glass hidden" id="timeline">
       <button class="tl-play" id="tlPlay" aria-label="Play">▶</button>
       <input class="tl-slider" id="tlSlider" type="range" min="0" max="0" value="0" aria-label="Date" />
       <span class="tl-date" id="tlDate">—</span>
       <span class="tl-res" id="tlRes"></span>
       <button class="tl-live hidden" id="tlLive">Live</button>
     </div>
-    <div class="map-caption"><span id="captionLayer">Sea surface temperature anomaly</span> · <span class="status" id="dataSource">no data loaded</span></div>
-    <div class="legend">
+
+    <div class="map-caption glass"><span id="captionLayer">Sea surface temperature anomaly</span> · <span class="status" id="dataSource">no data loaded</span></div>
+
+    <div class="legend glass">
       <div class="title" id="legendTitle">SST anomaly (°C)</div>
       <div class="bar" id="legendBar"></div>
       <div class="ticks" id="legendTicks"></div>
-    </div>
-    <div class="uploader" id="uploader">
-      <div class="uploader-inner">
-        <div class="uploader-title">Load SST anomaly data</div>
-        <div class="uploader-sub">Select both sst_anomaly.png and sst_anomaly.meta.json, as produced by extract_sst_anomaly.py</div>
-        <label class="uploader-btn">Choose files<input type="file" id="fileInput" accept=".png,.json,image/png,application/json" multiple /></label>
-      </div>
     </div>
   </div>
 </div>
@@ -311,7 +454,11 @@ function rampRGB(layer, v){
 // NaN is NaN throughout decoding, sampling and averaging, and only the colour
 // it is drawn in depends on which side of the coastline carries the data.
 const LAND_GREY = [124, 122, 112];
-const OCEAN_INK = [ 21,  52,  58];
+// Dark enough to sit quietly against the near-black canvas -- the old teal was
+// picked to match a teal page background, and on black it read as a lit slab
+// competing with the land it is supposed to frame. Still a shade above the
+// backdrop, so the map's own extent stays visible against space.
+const OCEAN_INK = [ 18,  28,  34];
 
 const SPI_TICKS = ['-2','-1.5','-1','-0.5','0','+0.5','+1','+1.5','+2'];
 const fmtSigned = v => signed(v);
@@ -441,7 +588,7 @@ function decodeBlob(blob){
 }
 
 // Older single-file JSON (lat[]/lon[]/anomaly_c[][]) -> the same grid object,
-// so the manual uploader still accepts a file produced before the PNG switch.
+// so a deployment still carrying a pre-PNG sst_anomaly.json keeps working.
 function gridFromLegacyJSON(data){
   const lat = data.lat, lon = data.lon, rows = data.anomaly_c;
   const h = lat.length, w = lon.length;
@@ -825,6 +972,19 @@ function setProjection(mode){
   document.getElementById('mapHint').textContent = (mode === 'flat')
     ? 'Drag to pan · scroll to zoom · click a country for details'
     : 'Drag to rotate · scroll to zoom · click a country for details';
+  showHint();
+}
+
+// The hint says how to drive the map, which is worth saying on arrival and
+// again when the projection flips the drag gesture from rotate to pan -- and
+// worth nothing at all for the rest of the session, so it fades itself out.
+let hintTimer = null;
+function showHint(ms){
+  const el = document.getElementById('mapHint');
+  if(!el) return;
+  el.classList.add('show');
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => el.classList.remove('show'), ms || 6000);
 }
 
 function stepMorph(){
@@ -1151,10 +1311,12 @@ function updatePolygonStats(){
 
 function openRegionPanel(){
   document.getElementById('regionPanel').classList.remove('hidden');
+  document.getElementById('regionBtn').classList.add('active');
   updatePolygonStats();
 }
 function closeRegionPanel(){
   document.getElementById('regionPanel').classList.add('hidden');
+  document.getElementById('regionBtn').classList.remove('active');
 }
 // ================= end region average =================
 
@@ -1465,7 +1627,7 @@ function seriesValueFor(date){
 }
 // ================= end archive playback =================
 
-// ================= ENSO strip =================
+// ================= ENSO readout =================
 // Two sources, because the three readouts want different things.
 //
 // The anomaly is computed straight from the grid already on screen: it is a day
@@ -1495,11 +1657,17 @@ function averageBox(g, b){
   return count ? { mean: vsum / wsum, count } : null;
 }
 
-function updateEnsoStrip(grid){
+// Feeds two surfaces from one computation: the pill, which carries only the
+// index and the phase name, and the popover behind it, which carries the
+// strength qualifier, the trend and the provenance note.
+function updateEnsoReadout(grid){
   const val = document.getElementById('ensoVal');
+  const valFull = document.getElementById('ensoValFull');
   const phase = document.getElementById('ensoPhase');
+  const phaseFull = document.getElementById('ensoPhaseFull');
   const trend = document.getElementById('ensoTrend');
   const note = document.getElementById('ensoNote');
+  const dot = document.getElementById('ensoDot');
   if(!val) return;
 
   // When scrubbed into the archive the displayed frame is 0.5 deg, and averaging
@@ -1508,17 +1676,26 @@ function updateEnsoStrip(grid){
   // beside the sparkline always matches the point the marker is sitting on.
   const archived = grid ? seriesValueFor(grid.date) : null;
   const n34 = archived ? { mean: archived.v } : (grid ? averageBox(grid, NINO34) : null);
-  val.textContent = n34 ? signed(n34.mean) + ' °C' : '—';
+  val.textContent = valFull.textContent = n34 ? signed(n34.mean) + ' °C' : '—';
 
   const e = grid && grid.meta && grid.meta.enso;
   if(e){
-    phase.textContent = e.phase + (e.strength ? ' — ' + e.strength : '');
+    // The pill gets the bare phase; "El Niño — Moderate" would not fit beside
+    // the index without the pill growing into the strip it replaced.
+    phase.textContent = e.phase;
+    phaseFull.textContent = e.phase + (e.strength ? ' — ' + e.strength : '');
     trend.textContent = e.trend + (e.trend !== 'Neutral' && e.delta_3season != null
       ? ` (${signed(e.delta_3season)} over 3 seasons)` : '');
   } else {
     phase.textContent = '—';
+    phaseFull.textContent = '—';
     trend.textContent = '—';
   }
+
+  // The status dot is the pill's at-a-glance read, so it follows the declared
+  // phase rather than today's anomaly -- the two can disagree for weeks.
+  dot.classList.toggle('warm', !!e && /El Ni/.test(e.phase));
+  dot.classList.toggle('cool', !!e && /La Ni/.test(e.phase));
 
   const parts = [];
   if(n34) parts.push(`Anomaly: area-weighted mean of the Niño 3.4 box (5°S–5°N, 170–120°W)`
@@ -1528,7 +1705,7 @@ function updateEnsoStrip(grid){
     : `Phase and trend need NOAA CPC's Oceanic Niño Index, which wasn't available when this data was built.`);
   note.textContent = parts.join(' ');
 }
-// ================= end ENSO strip =================
+// ================= end ENSO readout =================
 
 // ---- click drill-down: area-averaged conditions from Open-Meteo -------------
 // Open-Meteo accepts many coordinates in one request and returns an array, and
@@ -1962,9 +2139,14 @@ function stepFlight(){
   if(k >= 1) viewTween = null;
 }
 
+// The labelled "back to world view" button folded into the reset control, so
+// that control has to advertise when it has a focus to back out of -- an icon
+// alone is not the affordance a labelled button was.
 function updateFocusUI(){
-  const b = document.getElementById('backBtn');
-  if(b) b.classList.toggle('hidden', !focusedCountry);
+  const b = document.getElementById('resetBtn');
+  if(!b) return;
+  b.classList.toggle('lit', !!focusedCountry);
+  b.title = focusedCountry ? 'Back to world view' : 'Reset view';
 }
 
 function focusCountry(c){
@@ -1996,6 +2178,27 @@ function clearFocus(){
 function exitToWorld(){
   document.getElementById('countryPanel').classList.add('hidden');
   clearFocus();
+}
+
+// ---- the view controls --------------------------------------------------
+// A button press is one discrete step, so it goes through the fly-to tween
+// rather than snapping the way the wheel does. One notch of the wheel moves
+// 0.25 world units; a press is worth a little more than that.
+const ZOOM_STEP = 0.45;
+function zoomBy(delta){
+  const v = currentView();
+  v.z = Math.max(camZMin(), Math.min(CAM_Z_MAX, v.z + delta));
+  flyTo(v);
+}
+
+// Both halves of what the old back button and a home button would separately
+// do: drop any country focus, then return the camera to where it started.
+// clearFocus() queues its own fly-to back to the pre-focus view, which this
+// immediately supersedes -- deliberately, since "reset" means the overview and
+// not wherever the user happened to be before drilling in.
+function resetView(){
+  exitToWorld();
+  flyTo({rotX:-0.15, rotY:0, panX:0, panY:0, z:CAM_Z0});
 }
 
 // ---- admin-1 ------------------------------------------------------------
@@ -2112,11 +2315,7 @@ function initScene(){
   canvas.addEventListener('wheel', onWheel, {passive:false});
   window.addEventListener('resize', onResize);
 
-  document.getElementById('fileInput').addEventListener('change', onFileChosen);
   document.getElementById('lastUpdated').textContent = '';
-  document.getElementById('loadBtn').addEventListener('click', () => {
-    document.getElementById('fileInput').click();
-  });
 
   buildLayerSwitch();
   buildLegend();
@@ -2127,10 +2326,30 @@ function initScene(){
   document.getElementById('cpBack').addEventListener('click', () => {
     if(focusedCountry) openCountryPanel(focusedCountry);
   });
-  document.getElementById('backBtn').addEventListener('click', exitToWorld);
 
   document.getElementById('projBtn').addEventListener('click', () => {
     setProjection(projMode === 'globe' ? 'flat' : 'globe');
+  });
+
+  // view controls
+  document.getElementById('zoomIn').addEventListener('click', () => zoomBy(-ZOOM_STEP));
+  document.getElementById('zoomOut').addEventListener('click', () => zoomBy(ZOOM_STEP));
+  document.getElementById('resetBtn').addEventListener('click', resetView);
+
+  // The ENSO detail opens on hover through CSS alone; the click here pins it
+  // open, which is what makes the sparkline usable with a pointer that has to
+  // leave the pill to get to it.
+  const enso = document.getElementById('enso');
+  const ensoPill = document.getElementById('ensoPill');
+  ensoPill.addEventListener('click', () => {
+    const open = enso.dataset.open !== '1';
+    enso.dataset.open = open ? '1' : '0';
+    ensoPill.setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('click', (e) => {
+    if(enso.contains(e.target)) return;
+    enso.dataset.open = '0';
+    ensoPill.setAttribute('aria-expanded', 'false');
   });
 
   // region-average tool
@@ -2154,11 +2373,11 @@ function initScene(){
     else if(e.key === 'Enter' && !polyClosed && polyPins.length > 2) closePolygon();
   });
 
+  updateFocusUI();
+  showHint(8000);
   animate();
 }
 
-// Shared by both the automatic fetch and the manual file picker: adopt a grid,
-// build the globe texture, and update the status UI.
 // Put a grid on screen. Shared by the first load and by every timeline step, so
 // scrubbing drives exactly the same path the live data does -- the region tools
 // and the ENSO readout follow the displayed day rather than lagging on it.
@@ -2171,13 +2390,12 @@ function displayGrid(grid){
   surfaceMesh.material.needsUpdate = true;
   if(old && old.dispose) old.dispose();
 
-  document.getElementById('dataSource').textContent =
-    `${grid.date || 'unknown date'} — ${grid.source || 'source unspecified'}`;
+  setStatus(`${grid.date || 'unknown date'} — ${grid.source || 'source unspecified'}`);
   // The Niño 3.4 readout is an SST quantity. Recomputing it from whichever grid
   // happens to be on screen would have it average SPI and print the answer in
   // degrees, so it stays bound to the SST layer and keeps its last value while
   // a drought overlay is displayed.
-  if(activeLayer.archive) updateEnsoStrip(grid);
+  if(activeLayer.archive) updateEnsoReadout(grid);
   // a closed region's stats were computed against the previous grid; recompute
   if(polyClosed){ polyResult = averagePolygon(polyPins, ringEdges(polyPins, true)); }
   if(!document.getElementById('regionPanel').classList.contains('hidden')) updatePolygonStats();
@@ -2187,12 +2405,17 @@ function applyGrid(grid, updatedLabel){
   liveGrid = grid;
   displayGrid(grid);
   document.getElementById('lastUpdated').textContent = updatedLabel;
-  document.getElementById('uploader').classList.add('hidden');
   loadArchive();
   return true;
 }
 
-function setStatus(msg){ document.getElementById('dataSource').textContent = msg; }
+// The caption line doubles as the error surface, so it has to be able to go
+// back to being an ordinary status once a later fetch succeeds.
+function setStatus(msg, isErr){
+  const el = document.getElementById('dataSource');
+  el.textContent = msg;
+  el.classList.toggle('err', !!isErr);
+}
 
 // ---- overlay switching --------------------------------------------------
 // Each layer's decoded grid is kept once fetched, so flipping back and forth
@@ -2242,7 +2465,7 @@ function selectLayer(id){
     })
     .catch(err => {
       if(activeLayer.id !== layer.id) return;
-      setStatus('could not load ' + layer.label + ' — ' + err.message);
+      setStatus('could not load ' + layer.label + ' — ' + err.message, true);
     });
 }
 
@@ -2263,11 +2486,11 @@ function fetchGrid(metaUrl){
     });
 }
 
-// On page load, try to fetch the committed data sitting next to this page. On
-// GitHub Pages this is the daily-refreshed pair; opened locally (file://) or
-// before the first workflow run the fetch fails, and we fall back to the
-// manual uploader overlay (which stays visible). A pre-PNG sst_anomaly.json is
-// still honoured if that is all that is there.
+// On page load, fetch the committed data sitting next to this page. On GitHub
+// Pages this is the daily-refreshed pair; opened locally (file://) or before
+// the first workflow run the fetch fails, and all the page can do is say so in
+// the caption line. A pre-PNG sst_anomaly.json is still honoured if that is all
+// that is there.
 function autoLoadData(){
   fetchGrid('./sst_anomaly.meta.json')
     .then(grid => applyGrid(grid, 'Updated ' + (grid.date || 'unknown date')))
@@ -2275,42 +2498,9 @@ function autoLoadData(){
       .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(data => applyGrid(gridFromLegacyJSON(data), 'Updated ' + (data.date || 'unknown date'))))
     .catch(() => {
-      setStatus('no live data found — load a file below');
-      updateEnsoStrip(null);
+      setStatus('no live data — sst_anomaly.meta.json could not be fetched', true);
+      updateEnsoReadout(null);
     });
-}
-
-// Manual load. Accepts the PNG and its sidecar together, a lone sidecar (the
-// PNG it names is fetched alongside), or a pre-PNG single-file JSON.
-function onFileChosen(e){
-  const files = Array.from(e.target.files || []);
-  if(!files.length) return;
-  const png = files.find(f => /\.png$/i.test(f.name));
-  const json = files.find(f => /\.json$/i.test(f.name));
-  const stamp = () => 'Loaded ' + new Date().toLocaleTimeString();
-
-  const readJSON = f => f.text().then(JSON.parse);
-
-  if(png && json){
-    Promise.all([readJSON(json), decodeBlob(png)])
-      .then(([meta, img]) => {
-        if(!meta.grid || !meta.encoding) throw new Error('that JSON is not a .meta.json sidecar');
-        applyGrid(decodeAnomalyImage(img, meta), stamp());
-      })
-      .catch(err => setStatus('could not load those files: ' + err.message));
-    return;
-  }
-  if(json){
-    readJSON(json)
-      .then(data => {
-        if(data.anomaly_c) return applyGrid(gridFromLegacyJSON(data), stamp());
-        if(data.grid && data.encoding) return fetchGrid('./sst_anomaly.meta.json').then(g => applyGrid(g, stamp()));
-        throw new Error('unrecognised JSON — expected anomaly_c or a grid/encoding sidecar');
-      })
-      .catch(err => setStatus('could not load that file: ' + err.message));
-    return;
-  }
-  setStatus('select sst_anomaly.png together with sst_anomaly.meta.json');
 }
 
 let moved=0;
@@ -2334,8 +2524,14 @@ function onPointerMove(e){
     return;
   }
   // not dragging: highlight the country under the cursor, and trail the
-  // in-progress polygon edge behind it
-  const ll = unproject(e.clientX, e.clientY);
+  // in-progress polygon edge behind it.
+  //
+  // The chrome floats over the map now, so a point inside a pill is also a
+  // point over a country. This listener is on window rather than the canvas
+  // (it has to keep tracking through a drag that leaves the viewport), so the
+  // pill case is filtered here: hovering a control is not hovering the map.
+  const overMap = e.target === renderer.domElement;
+  const ll = overMap ? unproject(e.clientX, e.clientY) : null;
   setHoveredCountry(ll && countries ? countryAt(ll[0], ll[1]) : null, e.clientX, e.clientY, ll);
   if(polyPins.length && !polyClosed) updateRubber(ll ? ll[0] : null, ll ? ll[1] : null);
 }
