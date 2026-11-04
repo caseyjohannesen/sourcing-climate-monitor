@@ -1,6 +1,6 @@
 {
- "date": "2026-11-02",
- "generated_at": "2026-11-03T20:02:00.153671+00:00",
+ "date": "2025-12-31",
+ "generated_at": "2026-11-04T20:23:01.071183+00:00",
  "source": "NOAA OISST v2 High-Res, anomaly vs 1991-2020 daily climatology",
  "resolution_deg": 0.25,
  "grid": {
@@ -313,9 +313,9 @@
  },
  "stats": {
   "ocean_cells": 691150,
-  "min_c": -9.576,
-  "max_c": 9.059,
-  "mean_c": 0.6478,
+  "min_c": -7.763,
+  "max_c": 8.734,
+  "mean_c": 0.371,
   "clipped_low": 0,
   "clipped_high": 0
  }
