@@ -390,20 +390,30 @@ const LAND = [
 // distinct near-zero "normal" band (+/-0.2). Each entry's `upto` is the band's
 // exclusive upper edge; values below -5 or at/above +5 get the extreme caps.
 const ANOMALY_BANDS = [
-  { upto: -5.0, rgb: [  6,   0,   1] },  // < -5   extreme cold cap
-  { upto: -4.0, rgb: [115,   0, 105] },  // -5..-4 purple
-  { upto: -3.0, rgb: [ 77,  50, 175] },  // -4..-3 blue-violet
-  { upto: -2.0, rgb: [  0,  20, 192] },  // -3..-2 blue
-  { upto: -1.0, rgb: [  0,  95, 255] },  // -2..-1 bright blue
-  { upto: -0.2, rgb: [  0, 205, 255] },  // -1..-0.2 cyan
-  { upto:  0.2, rgb: [220, 220, 220] },  // -0.2..+0.2 normal (grey)
-  { upto:  1.0, rgb: [247, 230,   0] },  // +0.2..+1 yellow
-  { upto:  2.0, rgb: [240, 170,   0] },  // +1..+2 gold
-  { upto:  3.0, rgb: [245, 100,   0] },  // +2..+3 orange
-  { upto:  4.0, rgb: [235,  24,   0] },  // +3..+4 red
-  { upto:  5.0, rgb: [140,  16,   0] },  // +4..+5 dark red
+  { upto: -10.0, rgb: [  6,   0,   1] },  // < -10  extreme cold cap
+  { upto:  -9.0, rgb: [ 22,   0,  24] },  // -10..-9
+  { upto:  -8.0, rgb: [ 38,   0,  40] },  // -9..-8
+  { upto:  -7.0, rgb: [ 55,   0,  58] },  // -8..-7
+  { upto:  -6.0, rgb: [ 75,   0,  75] },  // -7..-6
+  { upto:  -5.0, rgb: [ 95,   0,  90] },  // -6..-5
+  { upto:  -4.0, rgb: [115,   0, 105] },  // -5..-4 purple
+  { upto:  -3.0, rgb: [ 77,  50, 175] },  // -4..-3 blue-violet
+  { upto:  -2.0, rgb: [  0,  20, 192] },  // -3..-2 blue
+  { upto:  -1.0, rgb: [  0,  95, 255] },  // -2..-1 bright blue
+  { upto:  -0.2, rgb: [  0, 205, 255] },  // -1..-0.2 cyan
+  { upto:   0.2, rgb: [220, 220, 220] },  // -0.2..+0.2 normal (grey)
+  { upto:   1.0, rgb: [247, 230,   0] },  // +0.2..+1 yellow
+  { upto:   2.0, rgb: [240, 170,   0] },  // +1..+2 gold
+  { upto:   3.0, rgb: [245, 100,   0] },  // +2..+3 orange
+  { upto:   4.0, rgb: [235,  24,   0] },  // +3..+4 red
+  { upto:   5.0, rgb: [140,  16,   0] },  // +4..+5 dark red
+  { upto:   6.0, rgb: [115,  12,   0] },  // +5..+6
+  { upto:   7.0, rgb: [ 95,   8,   0] },  // +6..+7
+  { upto:   8.0, rgb: [ 75,   5,   0] },  // +7..+8
+  { upto:   9.0, rgb: [ 55,   3,   0] },  // +8..+9
+  { upto:  10.0, rgb: [ 35,   1,   0] },  // +9..+10
 ];
-const ANOMALY_OVER = [13, 0, 0];         // > +5   extreme warm cap
+const ANOMALY_OVER = [13, 0, 0];          // >= +10  extreme warm cap
 
 // Diverging brown->blue, the conventional SPI/SPEI palette (ColorBrewer BrBG):
 // dry is brown, wet is blue-green, near-normal is near-white. Bands are the
