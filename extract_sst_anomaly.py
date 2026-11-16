@@ -85,7 +85,7 @@ CLIM_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sst.
 # map can show, and region averages over thousands of cells average it away.
 NODATA_LEVEL = 0
 CORE_MIN, CORE_MAX = -10.0, 10.0
-CORE_STEP = 0.05
+CORE_STEP = 0.1
 CORE_LEVEL_MIN = 27                                  # level for CORE_MIN
 CORE_LEVEL_MAX = CORE_LEVEL_MIN + int(round((CORE_MAX - CORE_MIN) / CORE_STEP))   # 227
 TAIL_STEP = 0.5
