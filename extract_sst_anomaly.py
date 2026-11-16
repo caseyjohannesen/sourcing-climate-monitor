@@ -84,7 +84,7 @@ CLIM_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sst.
 # colour bands are 0.2-1.0 C wide, so the fine step is well below anything the
 # map can show, and region averages over thousands of cells average it away.
 NODATA_LEVEL = 0
-CORE_MIN, CORE_MAX = -5.0, 5.0
+CORE_MIN, CORE_MAX = -10.0, 10.0
 CORE_STEP = 0.05
 CORE_LEVEL_MIN = 27                                  # level for CORE_MIN
 CORE_LEVEL_MAX = CORE_LEVEL_MIN + int(round((CORE_MAX - CORE_MIN) / CORE_STEP))   # 227
